@@ -131,7 +131,8 @@ class ScooterSensor(ScooterEntity, SensorEntity):
         if self.entity_description.key == "charge_status":
             c = self.hub.charge
             return {"target_percent": c.target, "smart_charging": c.enabled, "last_session": c.last_session,
-                    "recent_sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-10:]]}
+                    "recent_sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-10:]],
+                    "cutoff": c.cutoff}
         if self.entity_description.key == "best_battery":
             b = self.hub.battery_best or {}
             return {"source": b.get("source"), "age_minutes": b.get("age_min"), "scooter_connected": self.hub.connected}

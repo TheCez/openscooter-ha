@@ -269,7 +269,10 @@ class OpenScooterChargeCard extends HTMLElement {
     $("tgt").setAttribute("transform", `rotate(${(tgt / 100) * 360} 50 50)`);
     $("tgt").style.display = c.enabled && tgt < 100 ? "" : "none";
 
-    $("status").textContent = charging ? "Charging since " + (c.started_at ? at(c.started_at) : "–")
+    const co = c.cutoff;
+    const cutTxt = charging && co ? (co.in_min != null ? " · switching off in " + Math.ceil(co.in_min) + " min"
+      : " · waiting for power under " + co.below_w + " W" + (co.power_w != null ? " (now " + Math.round(co.power_w * 10) / 10 + " W)" : "")) : "";
+    $("status").textContent = charging ? "Charging since " + (c.started_at ? at(c.started_at) : "–") + cutTxt
       : waiting ? "Plug on, waiting for the charger to draw power"
       : done && last ? (last.reason === "taper" ? "Fully charged" : "Charged") + " to " + Math.round(last.end_percent ?? 100) + "%" + (last.real_percent != null ? "" : " (estimated)") + " · " + Number(last.energy_kwh).toFixed(2) + " kWh"
       : c.enabled ? "Smart charging ready" : "Smart charging is off";

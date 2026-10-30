@@ -255,6 +255,18 @@ class ChargeManager:
             return None
         return {k: v for k, v in self.history[-1].items() if k != "curve"}
 
+    @property
+    def cutoff(self) -> dict[str, Any] | None:
+        """What the automatic switch-off is waiting for (shown in the card and the status sensor)."""
+        s = self.session
+        if self.status != "charging" or not s:
+            return None
+        off_w = float(self._o.get(CONF_OFF_W, DEFAULT_OFF_W))
+        off_min = float(self._o.get(CONF_OFF_MIN, DEFAULT_OFF_MIN))
+        low = dt_util.parse_datetime(s["low_since"]) if s.get("low_since") else None
+        left = round(max(0.0, off_min - (dt_util.utcnow() - low).total_seconds() / 60.0), 1) if low else None
+        return {"below_w": off_w, "delay_min": off_min, "power_w": self.power_w, "low_since": s.get("low_since"), "in_min": left}
+
     def snapshot(self) -> dict[str, Any]:
         s = self.session
         return {
@@ -267,7 +279,7 @@ class ChargeManager:
             "remaining_min": self.remaining_min,
             "kwh_per_percent": self.kwh_per_percent,
             "model_sessions": self.model_sessions, "total_sessions": self.total_sessions,
-            "full_level": self.full_level, "estimate_error": self.mean_abs_error,
+            "full_level": self.full_level, "estimate_error": self.mean_abs_error, "cutoff": self.cutoff,
             "last": self.last_session,
         }
 
@@ -513,7 +525,10 @@ class ChargeManager:
             self.status = "idle"
             self.hub.notify()
             return
-        await self._resync_session()   # make sure start and energy match the plug's real history before storing
+        try:
+            await self._resync_session()   # make sure start and energy match the plug's real history before storing
+        except Exception as err:  # noqa: BLE001 - never let the repair stop a charge from ending
+            _LOGGER.warning("Could not repair the session before storing it: %s", err)
         s = self.session or s
         now = dt_util.utcnow()
         started = dt_util.parse_datetime(s["start"]) or now
@@ -647,11 +662,15 @@ class ChargeManager:
             if power < off_w and now - started > timedelta(minutes=5):
                 if s["low_since"] is None:
                     s["low_since"] = now.isoformat()
+                    _LOGGER.info("Charge end timer started: %.1f W is under %.1f W; the plug is switched off after %.0f min below it",
+                                 power, off_w, off_min)
                 low = dt_util.parse_datetime(s["low_since"]) or now
                 if now - low >= timedelta(minutes=off_min):
                     await self.async_end("taper")
                     return
             else:
+                if s["low_since"] is not None:
+                    _LOGGER.info("Charge end timer reset: power is %.1f W (needs to stay under %.1f W)", power, off_w)
                 s["low_since"] = None
 
         # "Charge up to X %": only with a trained model, and only after two checks in a row.
