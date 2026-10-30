@@ -305,11 +305,11 @@ class ChargeManager:
             from homeassistant.components.recorder import get_instance, history
 
             begin = now - BACKFILL
-            ids = [power_id] + ([energy_id] if energy_id else [])
+            ids = [power_id] + ([energy_id] if energy_id else []) + ([self.plug] if self.plug else [])
             states = await get_instance(self.hass).async_add_executor_job(
                 lambda: history.get_significant_states(self.hass, begin, now, ids, None, True, False, False, True))
         except Exception as err:  # noqa: BLE001 - history is a nicety, never a requirement
-            _LOGGER.debug("No history for the charge start: %s", err)
+            _LOGGER.warning("Could not read the plug history for the charge start: %s", err)
             return now, 0.0, None
 
         def series(entity_id):
@@ -324,18 +324,25 @@ class ChargeManager:
         pts = series(power_id)
         if not pts:
             return now, 0.0, None
+        # Walk back from now over the numeric readings: the run ends at the last reading below MIN_ON_W.
+        # Unavailable/unknown readings (e.g. while Home Assistant restarted) neither start nor break a run.
         start = None
         for i in range(len(pts) - 1, -1, -1):
             ts, w = pts[i]
-            if w is None or w < MIN_ON_W:
+            if w is None:
+                continue
+            if w < MIN_ON_W:
                 break
             start = ts
         if start is None:
             return now, 0.0, None
-        # The plug cannot have delivered power before it was switched on.
-        plug_state = self.hass.states.get(self.plug) if self.plug else None
-        if plug_state is not None and plug_state.state == "on" and plug_state.last_changed > start:
-            start = plug_state.last_changed
+        # The plug cannot have delivered power while it was switched off: start after its last "off".
+        if self.plug:
+            sw = sorted(((st.last_updated, st.state) for st in states.get(self.plug, [])), key=lambda x: x[0])
+            last_off = max((ts for ts, s_ in sw if s_ == "off"), default=None)
+            if last_off is not None and last_off > start:
+                on_after = [ts for ts, s_ in sw if s_ == "on" and ts > last_off]
+                start = on_after[0] if on_after else start
         start = min(start, now)
 
         e_start = None
@@ -358,7 +365,7 @@ class ChargeManager:
         power = self._float_state(self._o.get(CONF_POWER)) or s.get("last_power") or 0.0
         start, energy0, e_hist = await self._real_start(now, power)
         old = dt_util.parse_datetime(s["start"]) or now
-        if self.session is not s or start <= old + timedelta(minutes=2):
+        if self.session is not s or abs((start - old).total_seconds()) <= 120:
             return
         _LOGGER.info("Charge start corrected from %s to %s (plug history)", old, start)
         s.update({"start": start.isoformat(), "energy": energy0, "e_start": e_hist if e_hist is not None else s.get("e_start"),
