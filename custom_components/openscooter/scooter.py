@@ -85,6 +85,13 @@ class ScooterHub:
             return {"value": float(self.data["battery"]), "source": "live", "age_min": 0}
         if c.status == "charging" and c.estimate is not None:
             return {"value": float(c.estimate), "source": "charging estimate", "age_min": 0}
+        # A charge that ended after the last real reading from the scooter: the level it was charged to is newer
+        # than 82 % seen before the charge. The scooter's next real reading (newer again) replaces it.
+        if c.status != "charging" and c.history:
+            rec = c.history[-1]
+            end = dt_util.parse_datetime(rec.get("end") or "")
+            if rec.get("end_percent") is not None and end is not None and (self.battery_ts is None or end > self.battery_ts):
+                return {"value": float(rec["end_percent"]), "source": "charged (estimated)", "age_min": None}
         if c.status in ("finished", "waiting", "idle") and c.last_estimate is not None:   # until the scooter reports a level again
             return {"value": float(c.last_estimate), "source": "charged (estimated)", "age_min": None}
         if self.data.get("battery") is not None:
