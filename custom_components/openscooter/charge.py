@@ -43,6 +43,7 @@ RUN_BREAK_W = 2.0                  # under this the plug delivers nothing: the e
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
+IDLE_GRACE = timedelta(minutes=3)       # same, right after a recorded charge
 IDLE_PLUG_OFF = timedelta(minutes=20)   # plug on, charger idling (scooter full or not connected) for this long: switch it off
 MAX_INTEGRATE_H = 0.1              # never integrate power over a gap longer than 6 min (e.g. a restart)
 TAIL_PCT = 10.0                    # the last 10 % are the slow constant-voltage part
@@ -778,7 +779,14 @@ class ChargeManager:
                     if self.status == "charging":
                         return
                     since = await self._idle_since(now)
-                    if now - since >= IDLE_PLUG_OFF:
+                    # After a charge was recorded recently, a plug that is on with an idle charger is simply forgotten:
+                    # a short grace (the scooter may just be getting plugged in) instead of the long one.
+                    recent = None
+                    if self.history:
+                        recent = dt_util.parse_datetime(self.history[-1].get("end") or "")
+                    grace = IDLE_GRACE if recent and (now - recent) < timedelta(hours=12) else IDLE_PLUG_OFF
+                    _LOGGER.info("Plug on, charger %.1f W for %s (history); switches off after %s", power, now - since, grace)
+                    if now - since >= grace:
                         _LOGGER.info("Plug has been on since %s with the charger idling (%.1f W): switching it off", since.isoformat(timespec="seconds"), power)
                         await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)
                         self.hass.bus.async_fire("openscooter_plug_idle_off", {"since": since.isoformat(), "power_w": power})
