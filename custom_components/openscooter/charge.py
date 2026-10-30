@@ -236,7 +236,7 @@ class ChargeManager:
             "power_w": self.power_w,
             "remaining_min": self.remaining_min,
             "kwh_per_percent": self.kwh_per_percent,
-            "model_sessions": self.model_sessions,
+            "model_sessions": self.model_sessions, "total_sessions": self.total_sessions,
             "last": self.last_session,
         }
 
@@ -385,6 +385,46 @@ class ChargeManager:
         self.hub.save_soon()
         _LOGGER.info("Charge session started %s ago (%.3f kWh already)", now - start, energy0)
 
+    async def _power_curve(self, start: datetime, end: datetime) -> list[list[float]] | None:
+        """The real power curve of the session from the plug's recorded history, one point per minute:
+        [minutes since start, kWh so far, watts]. None when there is no history."""
+        power_id = self._o.get(CONF_POWER)
+        try:
+            if not power_id or "recorder" not in self.hass.config.components:
+                return None
+            from homeassistant.components.recorder import get_instance, history
+
+            states = await get_instance(self.hass).async_add_executor_job(
+                lambda: history.get_significant_states(self.hass, start, end, [power_id], None, True, False, False, True))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("No history for the power curve: %s", err)
+            return None
+        pts: list[tuple[datetime, float]] = []
+        for st in states.get(power_id, []):
+            try:
+                pts.append((st.last_updated, float(st.state)))
+            except (TypeError, ValueError):
+                continue
+        pts.sort(key=lambda x: x[0])
+        if len(pts) < 2:
+            return None
+        curve: list[list[float]] = []
+        energy = 0.0
+        total_min = int((end - start).total_seconds() // 60)
+        idx, last_w, last_t = 0, 0.0, start
+        for m in range(0, min(total_min, CURVE_MAX * 4) + 1):
+            t_m = start + timedelta(minutes=m)
+            while idx < len(pts) and pts[idx][0] <= t_m:
+                ts, w = pts[idx]
+                ts = max(ts, last_t)
+                energy += last_w * (ts - last_t).total_seconds() / 3600.0 / 1000.0
+                last_t, last_w = ts, w
+                idx += 1
+            energy += last_w * (t_m - last_t).total_seconds() / 3600.0 / 1000.0
+            last_t = t_m
+            curve.append([float(m), round(energy, 4), round(last_w, 1)])
+        return curve
+
     async def async_end(self, reason: str) -> None:
         """Stop now: plug off, store the session, refit the model."""
         if self.plug and reason != "plug_off":
@@ -401,7 +441,10 @@ class ChargeManager:
         start_pct = s.get("start_percent")
         source = s.get("start_source")
         curve = s.get("curve", [])
-        peak = float(s.get("peak_w", 0.0))
+        full = await self._power_curve(started, now)
+        if full:
+            curve = full
+        peak = max([float(s.get("peak_w", 0.0))] + [c[2] for c in curve])
 
         # Tail length: time since the power last was near its peak.
         tail_min = None
@@ -435,9 +478,11 @@ class ChargeManager:
             "id": s["start"], "start": s["start"], "end": now.isoformat(), "start_percent": start_pct,
             "start_source": source, "end_percent": end_pct, "energy_kwh": energy, "duration_min": round(minutes, 1),
             "peak_w": round(peak, 1), "avg_w": round(energy * 1000.0 / (minutes / 60.0), 1) if minutes > 1 else None,
-            "reason": reason, "learn": learn, "tail_min": tail_min, "curve": curve[-CURVE_MAX:],
+            "reason": reason, "learn": learn, "tail_min": tail_min, "curve": curve[-CURVE_MAX * 4:],
         }
         self.history = (self.history + [rec])[-HISTORY_MAX:]
+        for old in self.history[:-30]:
+            old.pop("curve", None)  # curves are kept for the last 30 sessions only
         self.total_kwh += energy
         self.total_sessions += 1
         self._refit()

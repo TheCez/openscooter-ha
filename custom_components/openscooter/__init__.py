@@ -36,6 +36,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if body.get("type") == "state" and isinstance(body.get("data"), dict):
             hub.update(body["data"])
         c = hub.charge
+        if body.get("type") == "sessions":
+            return web.json_response({"ok": True, "version": VERSION, "sessions": c.history[-60:]})
         return web.json_response({
             "ok": True, "version": VERSION,
              "charge": c.snapshot(),
