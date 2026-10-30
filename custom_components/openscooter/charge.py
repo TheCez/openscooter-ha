@@ -313,6 +313,25 @@ class ChargeManager:
         except ValueError:
             return None
 
+    def _mark_charged(self) -> None:
+        """The plug was cut because the charger idled after a charge: the scooter is charged. Report that level
+        (estimated) everywhere until the scooter itself reports one."""
+        if self.status == "charging":
+            return
+        level = None
+        if self.history:
+            rec = self.history[-1]
+            level = rec.get("end_percent")
+        if level is None:
+            level = self.full_level
+        if level is None:
+            return
+        self.last_estimate = float(level)
+        self.status = "finished"
+        _LOGGER.info("Scooter reported as charged (estimated %s %%)", level)
+        self.hub.notify()
+        self.hub.save_soon()
+
     def on_fresh_battery(self) -> None:
         self.verify_with_scooter()
         self.last_estimate = None  # the scooter itself reported a battery level again
@@ -791,6 +810,7 @@ class ChargeManager:
                         await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)
                         self.hass.bus.async_fire("openscooter_plug_idle_off", {"since": since.isoformat(), "power_w": power})
                         self._idle_ticks = 0
+                        self._mark_charged()
             else:
                 self._idle_ticks = 0
         else:
