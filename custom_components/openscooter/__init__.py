@@ -43,7 +43,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return web.json_response({"ok": True, "version": VERSION, **hub.restore_payload()})
         if kind == "track":
             ok = hub.merge_track(body.get("data"))
-            return web.json_response({"ok": True, "version": VERSION, "stored": ok, "tracks": len(hub.tracks)})
+            return web.json_response({"ok": True, "version": VERSION, "stored": ok, "tracks": len(hub.tracks), "sketches": len(hub.sketches)})
         if kind in ("rides", "segments", "model"):
             if kind == "rides":
                 added = hub.merge_rides(body.get("data"))
@@ -150,16 +150,21 @@ def ws_rides(hass: HomeAssistant, connection: websocket_api.ActiveConnection, ms
         connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
         return
     rows = sorted(hub.rides.values(), key=lambda r: r.get("start") or 0, reverse=True)[: msg["limit"]]
-    connection.send_result(msg["id"], {"rides": [{**r, "has_track": str(r["id"]) in hub.tracks} for r in rows]})
+    connection.send_result(msg["id"], {"rides": [{**r, "has_track": str(r["id"]) in hub.tracks or str(r["id"]) in hub.sketches,
+                                          "full_track": str(r["id"]) in hub.tracks} for r in rows]})
 
 
-@websocket_api.websocket_command({vol.Required("type"): "openscooter/track", vol.Required("id"): vol.Any(int, str)})
+@websocket_api.websocket_command({vol.Required("type"): "openscooter/track", vol.Required("ride_id"): vol.Any(int, str)})
 @callback
 def ws_track(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
     """The GPS route of one ride: [[lat, lon, time_ms, kmh], ...]."""
     hub = _hub(hass)
-    pts = hub.tracks.get(str(msg["id"])) if hub else None
+    key = str(msg["ride_id"])
+    pts = hub.tracks.get(key) if hub else None
+    full = pts is not None
+    if pts is None and hub:
+        pts = hub.sketches.get(key)
     if pts is None:
         connection.send_error(msg["id"], "not_found", "No route stored for this ride")
         return
-    connection.send_result(msg["id"], {"id": msg["id"], "points": pts})
+    connection.send_result(msg["id"], {"ride_id": msg["ride_id"], "points": pts, "simplified": not full})

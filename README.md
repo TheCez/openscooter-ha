@@ -43,7 +43,9 @@ After a reinstall or on a new phone, pair again and the app restores everything 
 
 ## Routes
 
-The app also sends the GPS route of each ride (thinned to at most 500 points) and Home Assistant stores the last 300. See them in the **OpenScooter** sidebar panel (ride list, map, *Download GPX*) or add a dashboard card:
+The app sends the GPS route of each ride. Home Assistant keeps the **complete route of the 10 newest rides**; older rides keep a **simplified route** (about 60 points, still drawn on the map) so the database stays small. **Ride summaries and range-learning observations are kept for good**: they calibrate the distance and battery estimates. The phone follows the same rule for its own route files.
+
+See the routes in the **OpenScooter** sidebar panel (ride list, map, *Download GPX*) or add a dashboard card:
 
 ```yaml
 type: custom:openscooter-route-card

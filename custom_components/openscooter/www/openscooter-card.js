@@ -143,14 +143,14 @@ class OpenScooterRouteCard extends HTMLElement {
     const info = this._root.getElementById("info"), map = this._root.getElementById("map");
     try {
       const r = await this._hass.callWS({ type: "openscooter/rides", limit: 20 });
-      const ride = r.rides.find((x) => x.has_track);
+      const ride = r.rides.find((x) => x.has_track);   // newest ride with a route
       if (!ride) { map.style.display = "none"; info.innerHTML = '<div class="empty">No ride with a GPS route has been synced yet.</div>'; return; }
-      const t = await this._hass.callWS({ type: "openscooter/track", id: ride.id });
+      const t = await this._hass.callWS({ type: "openscooter/track", ride_id: ride.id });
       map.style.display = "";
       drawRoute(map, t.points);
       const km = (ride.dist / 1000).toFixed(1), mins = Math.round((ride.end - ride.start) / 60000);
       info.innerHTML = `<div><b>${km} km</b><div class="sub">${new Date(ride.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</div></div>` +
-        `<div style="text-align:right">${mins} min<div class="sub">${ride.b0 >= 0 && ride.b1 >= 0 ? "battery " + ride.b0 + "% → " + ride.b1 + "%" : ""}</div></div>`;
+        `<div style="text-align:right">${mins} min<div class="sub">${ride.b0 >= 0 && ride.b1 >= 0 ? "battery " + ride.b0 + "% → " + ride.b1 + "%" : ""}${t.simplified ? " · simplified route" : ""}</div></div>`;
     } catch (e) { info.innerHTML = '<div class="empty">Could not load the route.</div>'; }
   }
 }

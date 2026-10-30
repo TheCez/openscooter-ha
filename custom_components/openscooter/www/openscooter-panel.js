@@ -109,9 +109,9 @@ class OpenScooterPanel extends HTMLElement {
       for (const ride of r.rides) {
         const row = document.createElement("div");
         row.style.cssText = "display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--divider-color);cursor:" + (ride.has_track ? "pointer" : "default");
-        row.innerHTML = `<span>${new Date(ride.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span>${(ride.dist / 1000).toFixed(1)} km${ride.has_track ? " · map" : ""}</span>`;
+        row.innerHTML = `<span>${new Date(ride.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span>${(ride.dist / 1000).toFixed(1)} km${ride.has_track ? (ride.full_track ? " · map" : " · map (simplified)") : ""}</span>`;
         if (ride.has_track) row.addEventListener("click", async () => {
-          const t = await this._hass.callWS({ type: "openscooter/track", id: ride.id });
+          const t = await this._hass.callWS({ type: "openscooter/track", ride_id: ride.id });
           this._cur = { ride, points: t.points };
           this._el.ridemap.hidden = false; this._el.rideactions.hidden = false;
           drawRoute(this._el.ridemap, t.points);

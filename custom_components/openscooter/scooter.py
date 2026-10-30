@@ -24,8 +24,10 @@ FIELDS = (
 RIDE_KEYS = ("id", "start", "end", "dist", "moving", "max", "avg", "b0", "b1")
 MAX_RIDES = 3000
 MAX_SEGMENTS = 50000
-MAX_TRACKS = 300
-MAX_TRACK_POINTS = 800
+KEEP_FULL_TRACKS = 10     # complete routes kept for the newest rides
+SKETCH_POINTS = 60        # older rides keep only a simplified route (summaries stay forever)
+MAX_SKETCHES = 3000
+MAX_TRACK_POINTS = 2500
 
 
 class ScooterHub:
@@ -44,7 +46,8 @@ class ScooterHub:
         self.segments: list[str] = []
         self._seg_keys: set[str] = set()
         self.tstore: Store = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.tracks")
-        self.tracks: dict[str, list] = {}   # ride id -> [[lat, lon, time_ms, kmh], ...] (thinned by the app)
+        self.tracks: dict[str, list] = {}    # newest rides: complete route [[lat, lon, time_ms, kmh], ...]
+        self.sketches: dict[str, list] = {}  # older rides: simplified route (about 60 points)
         self.model: dict[str, Any] = {}
         self.data_synced: datetime | None = None
 
@@ -64,7 +67,10 @@ class ScooterHub:
         self.segments = d.get("segments", [])
         self._seg_keys = {r.split(",", 1)[0] for r in self.segments}
         self.model = d.get("model", {})
-        self.tracks = (await self.tstore.async_load() or {}).get("tracks", {})
+        td = await self.tstore.async_load() or {}
+        self.tracks = td.get("tracks", {})
+        self.sketches = td.get("sketches", {})
+        self._enforce_track_policy()
         if (ts := d.get("synced")):
             self.data_synced = dt_util.parse_datetime(ts)
 
@@ -164,12 +170,26 @@ class ScooterHub:
         if len(pts) < 2:
             return False
         self.tracks[str(data["id"])] = pts
-        if len(self.tracks) > MAX_TRACKS:
-            for k in sorted(self.tracks, key=lambda x: int(x) if x.isdigit() else 0)[: len(self.tracks) - MAX_TRACKS]:
-                self.tracks.pop(k, None)
-        self.tstore.async_delay_save(lambda: {"tracks": self.tracks}, 30)
+        self.sketches.pop(str(data["id"]), None)
+        self._enforce_track_policy()
+        self.tstore.async_delay_save(lambda: {"tracks": self.tracks, "sketches": self.sketches}, 30)
         self.notify()
         return True
+
+    def _ride_time(self, key: str) -> int:
+        r = self.rides.get(key)
+        if r and r.get("start"):
+            return int(r["start"])
+        return int(key) if key.isdigit() else 0
+
+    def _enforce_track_policy(self) -> None:
+        """Complete routes only for the newest rides; older ones shrink to a simplified route."""
+        keys = sorted(set(self.tracks) | set(self.sketches), key=self._ride_time, reverse=True)
+        for k in keys[KEEP_FULL_TRACKS:]:
+            if k in self.tracks:
+                self.sketches[k] = simplify_route(self.tracks.pop(k), SKETCH_POINTS)
+        for k in keys[KEEP_FULL_TRACKS:][MAX_SKETCHES:]:
+            self.sketches.pop(k, None)
 
     @callback
     def set_model(self, model: Any) -> None:
@@ -180,4 +200,41 @@ class ScooterHub:
     def restore_payload(self) -> dict[str, Any]:
         """Everything a fresh install needs to continue where the old one stopped."""
         return {"rides": list(self.rides.values()), "segments": self.segments, "model": self.model,
-                "charges": self.charge.history[-60:], "tracks": self.tracks}
+                "charges": self.charge.history[-60:], "tracks": {**self.sketches, **self.tracks}}
+
+
+def simplify_route(pts: list, max_points: int) -> list:
+    """Douglas-Peucker, tightening until at most max_points remain (keeps the first and the last point)."""
+    if len(pts) <= max_points:
+        return pts
+    import math
+
+    ky = 110540.0
+    kx = 111320.0 * math.cos(math.radians(pts[0][0]))
+    xy = [(p[1] * kx, p[0] * ky) for p in pts]
+
+    def dist(i: int, a: int, b: int) -> float:
+        (x, y), (x1, y1), (x2, y2) = xy[i], xy[a], xy[b]
+        dx, dy = x2 - x1, y2 - y1
+        n = math.hypot(dx, dy)
+        return math.hypot(x - x1, y - y1) if n == 0 else abs(dx * (y1 - y) - dy * (x1 - x)) / n
+
+    eps = 2.0
+    for _ in range(40):
+        keep = {0, len(pts) - 1}
+        stack = [(0, len(pts) - 1)]
+        while stack:
+            s, e = stack.pop()
+            md, mi = 0.0, -1
+            for i in range(s + 1, e):
+                d = dist(i, s, e)
+                if d > md:
+                    md, mi = d, i
+            if mi >= 0 and md > eps:
+                keep.add(mi)
+                stack += [(s, mi), (mi, e)]
+        if len(keep) <= max_points:
+            return [pts[i] for i in sorted(keep)]
+        eps *= 1.6
+    step = max(1, len(pts) // max_points)
+    return pts[::step] + [pts[-1]]
