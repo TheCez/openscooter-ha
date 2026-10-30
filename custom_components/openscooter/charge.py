@@ -39,6 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 STALE_BATTERY_H = 12
 TICK = timedelta(seconds=15)
 BACKFILL = timedelta(hours=12)       # how far back the real charge start is searched
+RUN_BREAK_W = 2.0                  # under this the plug delivers nothing: the end of a run
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
@@ -383,17 +384,22 @@ class ChargeManager:
         pts = series(power_id)
         if not pts:
             return now, 0.0, None
-        # Walk back from now over the numeric readings: the run ends at the last reading below MIN_ON_W.
+        # Walk back from now over the numeric readings. A charge is one run of power: it breaks only when the plug
+        # really delivered nothing (under RUN_BREAK_W, i.e. switched off), NOT when the charger tapers to its idle draw
+        # of a few watts at the end. The run must contain real charging power somewhere (>= MIN_ON_W).
         # Unavailable/unknown readings (e.g. while Home Assistant restarted) neither start nor break a run.
         start = None
+        active = False
         for i in range(len(pts) - 1, -1, -1):
             ts, w = pts[i]
             if w is None:
                 continue
-            if w < MIN_ON_W:
+            if w < RUN_BREAK_W:
                 break
             start = ts
-        if start is None:
+            if w >= MIN_ON_W:
+                active = True
+        if start is None or not active:
             return now, 0.0, None
         # The plug cannot have delivered power while it was switched off: start after its last "off".
         if self.plug:
@@ -428,7 +434,8 @@ class ChargeManager:
             return
         _LOGGER.info("Charge start corrected from %s to %s (plug history)", old, start)
         s.update({"start": start.isoformat(), "energy": energy0, "e_start": e_hist if e_hist is not None else s.get("e_start"),
-                  "last_ts": now.isoformat(), "low_since": None, "peak_w": max(float(s.get("peak_w", 0)), power),
+                  "last_ts": now.isoformat(), "low_since": s.get("low_since") if start < old else None,
+                  "peak_w": max(float(s.get("peak_w", 0)), power),
                   "curve": [[0.0, round(energy0, 4), round(power, 1)]], "curve_ts": now.isoformat()})
         self.hub.notify()
         self.hub.save_soon()
@@ -506,6 +513,8 @@ class ChargeManager:
             self.status = "idle"
             self.hub.notify()
             return
+        await self._resync_session()   # make sure start and energy match the plug's real history before storing
+        s = self.session or s
         now = dt_util.utcnow()
         started = dt_util.parse_datetime(s["start"]) or now
         energy = round(s["energy"], 3)
