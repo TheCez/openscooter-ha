@@ -115,6 +115,8 @@ class ChargeManager:
 
     async def async_start(self) -> None:
         self._unsub = async_track_time_interval(self.hass, self._tick, TICK)
+        # A session restored after a restart may be stale (the plug was switched off and on meanwhile).
+        self.hass.async_create_task(self._resync_session())
 
     async def async_stop(self) -> None:
         if self._unsub:
@@ -347,6 +349,24 @@ class ChargeManager:
             energy += (w0 + w1) / 2.0 * max(0.0, (t1 - t0).total_seconds()) / 3600.0 / 1000.0
         return start, energy, e_start
 
+    async def _resync_session(self) -> None:
+        """Move the start of the running session to when the charger really started (history of the plug)."""
+        s = self.session
+        if self.status != "charging" or s is None:
+            return
+        now = dt_util.utcnow()
+        power = self._float_state(self._o.get(CONF_POWER)) or s.get("last_power") or 0.0
+        start, energy0, e_hist = await self._real_start(now, power)
+        old = dt_util.parse_datetime(s["start"]) or now
+        if self.session is not s or start <= old + timedelta(minutes=2):
+            return
+        _LOGGER.info("Charge start corrected from %s to %s (plug history)", old, start)
+        s.update({"start": start.isoformat(), "energy": energy0, "e_start": e_hist if e_hist is not None else s.get("e_start"),
+                  "last_ts": now.isoformat(), "low_since": None, "peak_w": max(float(s.get("peak_w", 0)), power),
+                  "curve": [[0.0, round(energy0, 4), round(power, 1)]], "curve_ts": now.isoformat()})
+        self.hub.notify()
+        self.hub.save_soon()
+
     async def _start_session(self, now: datetime, power: float) -> None:
         start, energy0, e_hist = await self._real_start(now, power)
         e = e_hist if e_hist is not None else self._float_state(self._o.get(CONF_ENERGY))
@@ -456,6 +476,9 @@ class ChargeManager:
 
         if self.status != "charging" or self.session is None:
             return
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        if self._ticks % 40 == 0:
+            await self._resync_session()
         s = self.session
         started = dt_util.parse_datetime(s["start"]) or now
 
