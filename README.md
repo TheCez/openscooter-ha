@@ -30,3 +30,13 @@ the start level, and off when the charger power stays under the set threshold fo
 Every finished charge teaches the integration how much energy 1 % of battery takes, after which charging also stops
 at your chosen target %. While charging the battery % is estimated. Events: `openscooter_charge_started`,
 `openscooter_charge_finished`. Services: `openscooter.start_charge`, `openscooter.stop_charge`.
+
+## Data and backup (0.2.0)
+
+Home Assistant is also the database of the app. The app sends it, automatically:
+
+- every **ride summary** (id, times, distance, speeds, battery start/end),
+- every **range-learning observation** (km per 1 % with the conditions: mode, speed, battery level, temperature, climb),
+- a small **model summary**, and the **estimated range** for the current mode (`sensor.openscooter_estimated_range`, with a low/high interval).
+
+After a reinstall or on a new phone, pair again and the app restores everything (or use *Restore from Home Assistant* in the app) and relearns from the stored observations. Charges are stored with their per-minute power curve and synced to the phone for analysis.
