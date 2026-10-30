@@ -56,7 +56,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                       "rides": len(hub.rides), "segments": len(hub.segments)})
         return web.json_response({
             "ok": True, "version": VERSION,
-             "charge": c.snapshot(),
+            "charge": c.snapshot(),
+            "battery": hub.battery_best,          # best known level: live, charging estimate, charged (estimated) or last seen
+            "range_km": hub.range_for(),
         })
 
     webhook.async_register(hass, DOMAIN, "OpenScooter", entry.data[CONF_WEBHOOK_ID], handle_webhook,
