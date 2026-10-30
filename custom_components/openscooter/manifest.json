@@ -17,7 +17,7 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/TheCez/openscooter-ha/issues",
   "requirements": [],
-  "version": "0.6.6",
+  "version": "0.6.7",
   "after_dependencies": [
     "recorder"
   ]

@@ -565,6 +565,82 @@ class ChargeManager:
             return now
         return min(max(low, on_since), now)
 
+    async def _recent_charge(self, now: datetime) -> tuple[datetime, datetime] | None:
+        """A charge that already happened without being recorded (e.g. Home Assistant was restarting): from the plug's
+        history, the run of real charging power followed by a power drop that has lasted at least the delay.
+        Returns (start of the run, when the power dropped) or None. Never returns a charge that is already stored."""
+        power_id = self._o.get(CONF_POWER)
+        try:
+            if not power_id or "recorder" not in self.hass.config.components:
+                return None
+            from homeassistant.components.recorder import get_instance, history
+
+            begin = now - timedelta(hours=10)
+            states = await get_instance(self.hass).async_add_executor_job(
+                lambda: history.get_significant_states(self.hass, begin, now, [power_id], None, True, False, False, True))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("No history to look for a finished charge: %s", err)
+            return None
+        pts: list[tuple[datetime, float | None]] = []
+        for st in states.get(power_id, []):
+            try:
+                pts.append((st.last_updated, float(st.state)))
+            except (TypeError, ValueError):
+                pts.append((st.last_updated, None))
+        pts.sort(key=lambda x: x[0])
+        hi = max((i for i, (_, w) in enumerate(pts) if w is not None and w >= MIN_ON_W), default=None)
+        if hi is None or hi + 1 >= len(pts):
+            return None
+        dropped = pts[hi + 1][0]
+        off_min = float(self._o.get(CONF_OFF_MIN, DEFAULT_OFF_MIN))
+        if (now - dropped).total_seconds() / 60.0 < off_min:
+            return None
+        i = hi
+        while i > 0:
+            w = pts[i - 1][1]
+            if w is None:
+                i -= 1
+                continue
+            if w < RUN_BREAK_W:
+                break
+            i -= 1
+        start = pts[i][0]
+        if (dropped - start).total_seconds() < 10 * 60:   # a real charge lasts longer than a blip
+            return None
+        if self.history:
+            last_end = dt_util.parse_datetime(self.history[-1].get("end") or "")
+            if last_end and dropped <= last_end + timedelta(minutes=10):
+                return None   # this one is already stored
+        return start, dropped
+
+    async def _recover_finished(self, now: datetime) -> None:
+        """Plug still on, charger idle, and the history shows a full charge that ended minutes ago: record it as finished
+        (estimated 100 % / learned full level), switch the plug off and report it - all inside Home Assistant."""
+        found = await self._recent_charge(now)
+        if found is None or self.status == "charging":
+            return
+        start, dropped = found
+        curve = await self._power_curve(start, dropped)
+        energy = float(curve[-1][1]) if curve else 0.0
+        battery = self.hub.data.get("battery")
+        seen = self.hub.battery_ts
+        age_h = (start - seen).total_seconds() / 3600.0 if seen else None
+        if battery is not None and (age_h is None or age_h > STALE_BATTERY_H):
+            battery = None
+        _LOGGER.info("History shows a charge from %s to %s (%.3f kWh) that was never recorded: finishing it now", start, dropped, energy)
+        self.session = {
+            "start": start.isoformat(), "start_percent": battery, "start_source": "scooter" if battery is not None else None,
+            "start_percent_age_min": None, "energy": energy, "last_ts": dropped.isoformat(), "last_power": 0.0,
+            "peak_w": max([c[2] for c in curve], default=0.0), "e_start": None, "low_since": dropped.isoformat(),
+            "curve": curve or [], "curve_ts": dropped.isoformat(),
+        }
+        self.status = "charging"
+        self._skip_resync = True
+        try:
+            await self.async_end("taper")
+        finally:
+            self._skip_resync = False
+
     async def _low_since(self, off_w: float, now: datetime) -> datetime:
         """When did the power really fall under [off_w] and stay there? Read from the plug's recorded history, so a
         restart, a reload or a saved setting never restarts the clock. Falls back to "now" without history."""
@@ -608,7 +684,8 @@ class ChargeManager:
             self.hub.notify()
             return
         try:
-            await self._resync_session()   # make sure start and energy match the plug's real history before storing
+            if not getattr(self, "_skip_resync", False):
+                await self._resync_session()   # make sure start and energy match the plug's real history before storing
         except Exception as err:  # noqa: BLE001 - never let the repair stop a charge from ending
             _LOGGER.warning("Could not repair the session before storing it: %s", err)
         s = self.session or s
@@ -692,11 +769,14 @@ class ChargeManager:
 
         # A plug left on while the charger only idles (scooter full or not connected) is switched off after a while,
         # counted from the plug's history so that a restart never resets the clock.
-        if self.status in ("idle", "finished") and self.enabled and self.plug and power is not None and power < MIN_ON_W:
+        if self.status in ("idle", "finished", "waiting") and self.enabled and self.plug and power is not None and power < MIN_ON_W:
             ps = self.hass.states.get(self.plug)
             if ps is not None and ps.state == "on":
                 self._idle_ticks += 1
                 if self._idle_ticks % 4 == 1:   # look into the history about once a minute
+                    await self._recover_finished(now)
+                    if self.status == "charging":
+                        return
                     since = await self._idle_since(now)
                     if now - since >= IDLE_PLUG_OFF:
                         _LOGGER.info("Plug has been on since %s with the charger idling (%.1f W): switching it off", since.isoformat(timespec="seconds"), power)
