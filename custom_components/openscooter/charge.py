@@ -83,6 +83,7 @@ class ChargeManager:
     # ---- persistence ---------------------------------------------------------------------------
     def load(self, d: dict[str, Any]) -> None:
         self.auto_enabled = d.get("auto_enabled", True)
+        self.away_seen = bool(d.get("away_seen", False))   # a restart must not look like "just arrived"
         self.history = list(d.get("history", []))[-HISTORY_MAX:]
         self.total_kwh = float(d.get("total_kwh", sum(h.get("energy_kwh", 0) for h in self.history)))
         self.total_sessions = int(d.get("total_sessions", len(self.history)))
@@ -99,7 +100,7 @@ class ChargeManager:
 
     def dump(self) -> dict[str, Any]:
         return {
-            "auto_enabled": self.auto_enabled, "history": self.history, "total_kwh": round(self.total_kwh, 3),
+            "auto_enabled": self.auto_enabled, "away_seen": self.away_seen, "history": self.history, "total_kwh": round(self.total_kwh, 3),
             "total_sessions": self.total_sessions, "status": self.status, "session": self.session,
             "last_estimate": self.last_estimate,
             "waiting_since": self._waiting_since.isoformat() if self._waiting_since and self.status == "waiting" else None,
@@ -364,6 +365,20 @@ class ChargeManager:
         self.hub.notify()
         self.hub.save_soon()
 
+    def _charged_and_unridden(self) -> bool:
+        """The last recorded charge ended recently and the odometer has not moved since (or is unknown within 6 h)."""
+        if not self.history:
+            return False
+        rec = self.history[-1]
+        end = dt_util.parse_datetime(rec.get("end") or "")
+        if end is None:
+            return False
+        age_h = (dt_util.utcnow() - end).total_seconds() / 3600.0
+        odo, odo_end = self.hub.data.get("odometer"), rec.get("odo_end")
+        if odo is not None and odo_end is not None:
+            return age_h < 48 and abs(float(odo) - float(odo_end)) <= 0.3
+        return age_h < 6
+
     def on_scooter_update(self) -> None:
         home = self._at_home()
         if home is False:
@@ -374,7 +389,10 @@ class ChargeManager:
         # the level from BEFORE the charge. Using that would restart the charge that has just finished.
         best = self.hub.battery_best
         battery = best["value"] if best else None
+        if self._charged_and_unridden():
+            return   # just charged and not ridden since: nothing to charge, whatever a reading says
         if battery is not None and battery < int(self._o.get(CONF_START_BELOW, DEFAULT_START_BELOW)):
+            _LOGGER.info("Arrival at home with %s %% (%s): starting the plug", battery, (best or {}).get("source"))
             self.hass.async_create_task(self.async_begin("arrival"))
 
     # ---- actions -------------------------------------------------------------------------------
