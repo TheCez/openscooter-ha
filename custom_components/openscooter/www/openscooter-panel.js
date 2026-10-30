@@ -95,7 +95,7 @@ class OpenScooterPanel extends HTMLElement {
       const recent = seen && Date.now() - seen.getTime() < 10 * 60 * 1000;
       this._el.dot.className = "dot" + (recent ? " on" : "");
       this._el.status.textContent = seen
-        ? (recent ? "App connected" : "App last seen " + seen.toLocaleString()) + (r.battery != null ? " · battery " + r.battery + " %" : "")
+        ? (recent ? "App connected" : "App last seen " + seen.toLocaleString()) + (r.battery != null ? " · battery " + Math.round(r.battery) + " %" + (r.battery_source && r.battery_source !== "live" ? " (" + r.battery_source + ")" : "") : "")
         : "Waiting for the app…";
     } catch (e) {
       this._el.status.textContent = "Could not load pairing data: " + (e.message || e);

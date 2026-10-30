@@ -118,7 +118,8 @@ def ws_pairing(hass: HomeAssistant, connection: websocket_api.ActiveConnection, 
                 "secret": hub.entry.data[CONF_SECRET],
                 "last_seen": hub.last_seen.isoformat() if hub.last_seen else None,
                 "connected": hub.connected,
-                "battery": hub.data.get("battery"),
+                "battery": (hub.battery_best or {}).get("value", hub.data.get("battery")),
+                "battery_source": (hub.battery_best or {}).get("source"),
             })
             return
     connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
