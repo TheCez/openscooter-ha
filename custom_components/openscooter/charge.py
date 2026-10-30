@@ -134,7 +134,8 @@ class ChargeManager:
         hist = self.history[-20:]
         fulls = [float(h["real_percent"]) for h in hist
                  if h.get("reason") == "taper" and h.get("real_percent") is not None and 80.0 <= float(h["real_percent"]) <= 100.0]
-        self.full_level = round(statistics.median(fulls[-5:]), 1) if fulls else 100.0
+        # "Full" is 100 unless several charges agree otherwise: two votes for 100 keep one odd reading from moving it
+        self.full_level = round(statistics.median([100.0, 100.0] + fulls[-5:]), 1)
         self.verified_errors = [float(h["error"]) for h in hist if h.get("error") is not None][-10:]
         pts: list[tuple[float, float, float]] = []   # (percent gained, 1 if it ran to full, energy kWh)
         for h in hist:
