@@ -661,6 +661,20 @@ class ChargeManager:
         finally:
             self._skip_resync = False
 
+    @staticmethod
+    def _was_tapered(curve: list[list[float]], peak: float) -> bool:
+        """Did the charger come down gradually (the battery filled up) or stop while still pushing hard (unplugged,
+        switched off early)? Looks at the 5 minutes before the power last was at charging level. True without data."""
+        pts = [c for c in curve if len(c) >= 3]
+        if not pts or peak <= 0:
+            return True
+        hi = max((i for i, c in enumerate(pts) if c[2] >= MIN_ON_W), default=None)
+        if hi is None:
+            return True
+        t_hi = pts[hi][0]
+        win = [c[2] for c in pts if t_hi - 5.0 <= c[0] <= t_hi]
+        return not win or (sum(win) / len(win)) <= 0.6 * peak
+
     async def _low_since(self, off_w: float, now: datetime) -> datetime:
         """When did the power really fall under [off_w] and stay there? Read from the plug's recorded history, so a
         restart, a reload or a saved setting never restarts the clock. Falls back to "now" without history."""
@@ -721,6 +735,10 @@ class ChargeManager:
             curve = full
         peak = max([float(s.get("peak_w", 0.0))] + [c[2] for c in curve])
 
+        if reason == "taper" and not self._was_tapered(curve, peak):
+            reason = "partial"   # the charger stopped while still pushing hard: not full, estimate from the energy
+            _LOGGER.info("The charge stopped before the charger tapered off: estimating the level from the energy")
+
         # Tail length: time since the power last was near its peak.
         tail_min = None
         if reason == "taper" and curve and peak > 0:
@@ -733,8 +751,13 @@ class ChargeManager:
             end_pct = self.full_level
         elif reason == "target":
             end_pct = float(self.target)
-        elif start_pct is not None and self.model:
-            end_pct = round(min(self.full_level, self._soc_after(float(start_pct), energy)), 1)
+        else:
+            if start_pct is None and self.model and self.hub.data.get("battery") is not None:
+                seen = self.hub.battery_ts
+                if seen is not None and seen <= started:   # the last real reading before this charge: still the best start
+                    start_pct, source = float(self.hub.data["battery"]), "last seen"
+            if start_pct is not None and self.model:
+                end_pct = round(min(self.full_level, self._soc_after(float(start_pct), energy)), 1)
 
         learn = False
         if reason == "taper" and start_pct is not None and source == "scooter":
