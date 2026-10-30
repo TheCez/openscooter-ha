@@ -1,7 +1,7 @@
 """Constants for the OpenScooter integration."""
 
 DOMAIN = "openscooter"
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 CONF_WEBHOOK_ID = "webhook_id"
 CONF_SECRET = "secret"
@@ -18,7 +18,7 @@ CONF_OFF_MIN = "off_delay_min"
 DEFAULT_TARGET = 90
 DEFAULT_START_BELOW = 95
 DEFAULT_OFF_W = 8
-DEFAULT_OFF_MIN = 6
+DEFAULT_OFF_MIN = 3
 
 STATIC_URL = "/openscooter_static"
 SIGNAL_UPDATE = "openscooter_update_{}"
