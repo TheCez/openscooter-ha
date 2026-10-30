@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 TICK = timedelta(seconds=15)
+BACKFILL = timedelta(hours=12)       # how far back the real charge start is searched
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
@@ -288,21 +289,81 @@ class ChargeManager:
         self.hub.save_soon()
         _LOGGER.info("Smart charging: plug on (%s)", reason)
 
-    def _start_session(self, now: datetime, power: float) -> None:
-        e = self._float_state(self._o.get(CONF_ENERGY))
+    async def _real_start(self, now: datetime, power: float) -> tuple[datetime, float, float | None]:
+        """When did the charger really start delivering power?
+
+        Looks into the recorded history of the plug's power sensor (and its energy counter) and returns
+        (start time, energy already delivered in kWh, counter value at the start or None). Falls back to
+        "now" when there is no history, so a missing recorder never breaks charging.
+        """
+        power_id, energy_id = self._o.get(CONF_POWER), self._o.get(CONF_ENERGY)
+        try:
+            if not power_id or "recorder" not in self.hass.config.components:
+                raise LookupError("no recorder")
+            from homeassistant.components.recorder import get_instance, history
+
+            begin = now - BACKFILL
+            ids = [power_id] + ([energy_id] if energy_id else [])
+            states = await get_instance(self.hass).async_add_executor_job(
+                lambda: history.get_significant_states(self.hass, begin, now, ids, None, True, False, False, True))
+        except Exception as err:  # noqa: BLE001 - history is a nicety, never a requirement
+            _LOGGER.debug("No history for the charge start: %s", err)
+            return now, 0.0, None
+
+        def series(entity_id):
+            out = []
+            for st in states.get(entity_id, []) if entity_id else []:
+                try:
+                    out.append((st.last_updated, float(st.state)))
+                except (TypeError, ValueError):
+                    out.append((st.last_updated, None))
+            return sorted(out, key=lambda x: x[0])
+
+        pts = series(power_id)
+        if not pts:
+            return now, 0.0, None
+        start = None
+        for i in range(len(pts) - 1, -1, -1):
+            ts, w = pts[i]
+            if w is None or w < MIN_ON_W:
+                break
+            start = ts
+        if start is None:
+            return now, 0.0, None
+        # The plug cannot have delivered power before it was switched on.
+        plug_state = self.hass.states.get(self.plug) if self.plug else None
+        if plug_state is not None and plug_state.state == "on" and plug_state.last_changed > start:
+            start = plug_state.last_changed
+        start = min(start, now)
+
+        e_start = None
+        energy = 0.0
+        eser = series(energy_id)
+        if eser:
+            before = [v for ts, v in eser if ts <= start and v is not None]
+            e_start = before[-1] if before else next((v for _, v in eser if v is not None), None)
+        run = [(ts, w) for ts, w in pts if ts >= start and w is not None]
+        for (t0, w0), (t1, w1) in zip(run, run[1:] + [(now, run[-1][1] if run else 0.0)]):
+            energy += (w0 + w1) / 2.0 * max(0.0, (t1 - t0).total_seconds()) / 3600.0 / 1000.0
+        return start, energy, e_start
+
+    async def _start_session(self, now: datetime, power: float) -> None:
+        start, energy0, e_hist = await self._real_start(now, power)
+        e = e_hist if e_hist is not None else self._float_state(self._o.get(CONF_ENERGY))
         battery = self.hub.data.get("battery")
         self.session = {
-            "start": now.isoformat(), "start_percent": battery,
+            "start": start.isoformat(), "start_percent": battery,
             "start_source": "scooter" if battery is not None else None,
-            "energy": 0.0, "last_ts": now.isoformat(), "last_power": power, "peak_w": power,
-            "e_start": e, "low_since": None, "curve": [[0.0, 0.0, round(power, 1)]], "curve_ts": now.isoformat(),
+            "energy": energy0, "last_ts": now.isoformat(), "last_power": power, "peak_w": power,
+            "e_start": e, "low_since": None, "curve": [[0.0, round(energy0, 4), round(power, 1)]], "curve_ts": now.isoformat(),
         }
         self.status = "charging"
         self._power_ticks = self._plug_off_ticks = self._target_ticks = 0
         self.last_estimate = None
-        self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": battery})
+        self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": battery, "started_at": start.isoformat()})
         self.hub.notify()
         self.hub.save_soon()
+        _LOGGER.info("Charge session started %s ago (%.3f kWh already)", now - start, energy0)
 
     async def async_end(self, reason: str) -> None:
         """Stop now: plug off, store the session, refit the model."""
@@ -378,14 +439,14 @@ class ChargeManager:
             if power is not None and power >= MIN_ON_W:
                 self._power_ticks += 1
                 if self._power_ticks >= 2:
-                    self._start_session(now, power)
+                    await self._start_session(now, power)
                     return
             else:
                 self._power_ticks = 0
 
         if self.status == "waiting":
             if power is not None and power >= MIN_ON_W:
-                self._start_session(now, power)
+                await self._start_session(now, power)
             elif self._waiting_since and now - self._waiting_since > WAIT_FOR_POWER:
                 if self.plug:
                     await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)
