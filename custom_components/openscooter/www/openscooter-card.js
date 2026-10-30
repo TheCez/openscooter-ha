@@ -36,15 +36,15 @@ class OpenScooterCard extends HTMLElement {
             <div class="ring">
               <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="var(--divider-color)" stroke-width="9"/>
                 <circle id="arc" cx="50" cy="50" r="42" fill="none" stroke="var(--primary-color)" stroke-width="9" stroke-linecap="round" stroke-dasharray="263.9" stroke-dashoffset="263.9"/></svg>
-              <div class="v"><b id="pct">???</b><span id="pctl">battery</span></div>
+              <div class="v"><b id="pct">–</b><span id="pctl">battery</span></div>
             </div>
-            <div><div class="name">OpenScooter</div><div class="state" id="state">???</div>
+            <div><div class="name">OpenScooter</div><div class="state" id="state">–</div>
               <div class="chips"><span class="chip" id="lock"></span><span class="chip" id="light"></span><span class="chip" id="mode"></span></div></div>
           </div>
           <div class="grid">
-            <div class="cell"><b id="odo">???</b><span>Odometer</span></div>
-            <div class="cell"><b id="trip">???</b><span>Last trip</span></div>
-            <div class="cell"><b id="speed">???</b><span>Speed</span></div>
+            <div class="cell"><b id="odo">–</b><span>Odometer</span></div>
+            <div class="cell"><b id="trip">–</b><span>Last trip</span></div>
+            <div class="cell"><b id="speed">–</b><span>Speed</span></div>
           </div>
           <div class="charge" id="charge"></div>
         </ha-card>`;
@@ -62,14 +62,14 @@ class OpenScooterCard extends HTMLElement {
     const charge = this._s("sensor", "charge_status");
     const charging = charge && charge.state === "charging";
     const value = charging && est ? Number(est.state) : batt ? Number(batt.state) : null;
-    this._q("pct").textContent = value == null || isNaN(value) ? "???" : Math.round(value) + "%";
+    this._q("pct").textContent = value == null || isNaN(value) ? "–" : Math.round(value) + "%";
     this._q("pctl").textContent = charging ? "charging" : "battery";
     this._q("arc").setAttribute("stroke-dashoffset", String(263.9 * (1 - Math.max(0, Math.min(100, value || 0)) / 100)));
 
     const conn = this._s("binary_sensor", "connected");
     const seen = this._s("sensor", "last_seen");
     let state = conn && conn.state === "on" ? "Connected" : "Not connected";
-    if (!(conn && conn.state === "on") && seen) state += " ?? last seen " + new Date(seen.state).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    if (!(conn && conn.state === "on") && seen) state += " · last seen " + new Date(seen.state).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
     this._q("state").textContent = state;
 
     const unlocked = this._s("binary_sensor", "unlocked");
@@ -82,7 +82,7 @@ class OpenScooterCard extends HTMLElement {
     const mode = this._s("sensor", "drive_mode");
     this._q("mode").textContent = mode ? mode.state : "Mode ?";
 
-    const fmt = (s, unit, d = 1) => (s && !isNaN(Number(s.state)) ? Number(s.state).toFixed(d) + " " + unit : "???");
+    const fmt = (s, unit, d = 1) => (s && !isNaN(Number(s.state)) ? Number(s.state).toFixed(d) + " " + unit : "–");
     this._q("odo").textContent = fmt(this._s("sensor", "odometer"), "km", 0);
     this._q("trip").textContent = fmt(this._s("sensor", "trip_distance"), "km");
     this._q("speed").textContent = fmt(this._s("sensor", "speed"), "km/h", 0);
@@ -90,7 +90,7 @@ class OpenScooterCard extends HTMLElement {
     let text = "";
     if (charge) {
       const a = charge.attributes || {};
-      if (charge.state === "charging") text = "Charging" + (est ? " ?? about " + Math.round(Number(est.state)) + "%" : "") + " ?? up to " + a.target_percent + "%";
+      if (charge.state === "charging") text = "Charging" + (est ? " · about " + Math.round(Number(est.state)) + "%" : "") + " · up to " + a.target_percent + "%";
       else if (charge.state === "waiting") text = "Plug on, waiting for the charger to draw power";
       else if (charge.state === "finished" && a.last_session) text = "Last charge: " + Number(a.last_session.energy_kwh).toFixed(2) + " kWh";
       else if (a.smart_charging) text = "Smart charging ready";

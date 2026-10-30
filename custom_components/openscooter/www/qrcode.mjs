@@ -626,16 +626,16 @@ export const qrcode = function(typeNumber, errorCorrectionLevel) {
     let y, x, r1, r2, p;
 
     const blocks = {
-      '??????': '???',
-      '??? ': '???',
-      ' ???': '???',
+      '██': '█',
+      '█ ': '▀',
+      ' █': '▄',
       '  ': ' '
     };
 
     const blocksLastLineNoMargin = {
-      '??????': '???',
-      '??? ': '???',
-      ' ???': ' ',
+      '██': '▀',
+      '█ ': '▀',
+      ' █': ' ',
       '  ': ' '
     };
 
@@ -644,7 +644,7 @@ export const qrcode = function(typeNumber, errorCorrectionLevel) {
       r1 = Math.floor((y - min) / cellSize);
       r2 = Math.floor((y + 1 - min) / cellSize);
       for (x = 0; x < size; x += 1) {
-        p = '???';
+        p = '█';
 
         if (min <= x && x < max && min <= y && y < max && _this.isDark(r1, Math.floor((x - min) / cellSize))) {
           p = ' ';
@@ -654,7 +654,7 @@ export const qrcode = function(typeNumber, errorCorrectionLevel) {
           p += ' ';
         }
         else {
-          p += '???';
+          p += '█';
         }
 
         // Output 2 characters per pixel, to create full square. 1 character per pixels gives only half width of square.
@@ -665,7 +665,7 @@ export const qrcode = function(typeNumber, errorCorrectionLevel) {
     }
 
     if (size % 2 && margin > 0) {
-      return ascii.substring(0, ascii.length - size - 1) + Array(size+1).join('???');
+      return ascii.substring(0, ascii.length - size - 1) + Array(size+1).join('▀');
     }
 
     return ascii.substring(0, ascii.length-1);
@@ -687,7 +687,7 @@ export const qrcode = function(typeNumber, errorCorrectionLevel) {
 
     let y, x, r, p;
 
-    const white = Array(cellSize+1).join('??????');
+    const white = Array(cellSize+1).join('██');
     const black = Array(cellSize+1).join('  ');
 
     let ascii = '';

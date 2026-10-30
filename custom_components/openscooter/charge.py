@@ -51,6 +51,7 @@ class ChargeManager:
         self.estimate: float | None = None  # battery % estimated through charging
         self.away_seen = True
         self._waiting_since: datetime | None = None
+        self._power_ticks = 0
         self._unsub = None
 
     # ---- persistence ---------------------------------------------------------------------------
@@ -177,21 +178,36 @@ class ChargeManager:
         self.hub.save_soon()
         _LOGGER.info("Smart charging finished (%s): %.3f kWh", reason, energy)
 
+    def _start_session(self, now: datetime, power: float) -> None:
+        e = self._float_state(self._o.get(CONF_ENERGY))
+        self.session = {
+            "start": now.isoformat(), "start_percent": self.hub.data.get("battery"), "energy": 0.0,
+            "last_ts": now.isoformat(), "last_power": power, "e_start": e, "low_since": None,
+        }
+        self.status = "charging"
+        self._power_ticks = 0
+        self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": self.session["start_percent"]})
+        self.hub.notify()
+
     # ---- the 15 s evaluation -------------------------------------------------------------------
     async def _tick(self, _now=None) -> None:
         power = self._float_state(self._o.get(CONF_POWER))
         now = dt_util.utcnow()
 
+        # A charge started by hand (plug switched on outside the integration) is picked up too, so it is
+        # also switched off at the end and also taught to the model.
+        if self.status in ("idle", "finished") and self.enabled:
+            if power is not None and power >= MIN_ON_W:
+                self._power_ticks += 1
+                if self._power_ticks >= 2:
+                    self._start_session(now, power)
+                    return
+            else:
+                self._power_ticks = 0
+
         if self.status == "waiting":
             if power is not None and power >= MIN_ON_W:
-                e = self._float_state(self._o.get(CONF_ENERGY))
-                self.session = {
-                    "start": now.isoformat(), "start_percent": self.hub.data.get("battery"), "energy": 0.0,
-                    "last_ts": now.isoformat(), "last_power": power, "e_start": e, "low_since": None,
-                }
-                self.status = "charging"
-                self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": self.session["start_percent"]})
-                self.hub.notify()
+                self._start_session(now, power)
             elif self._waiting_since and now - self._waiting_since > WAIT_FOR_POWER:
                 if self.plug:
                     await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)

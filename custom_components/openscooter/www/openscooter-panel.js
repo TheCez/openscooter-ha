@@ -38,11 +38,11 @@ class OpenScooterPanel extends HTMLElement {
         <h1>OpenScooter</h1>
         <div class="sub">Pair the app with this Home Assistant</div>
         <div class="card">
-          <div class="status"><span class="dot" id="dot"></span><span id="status">Waiting for the app???</span></div>
+          <div class="status"><span class="dot" id="dot"></span><span id="status">Waiting for the app…</span></div>
         </div>
         <div class="card">
           <ol>
-            <li>Open the OpenScooter app ??? <b>Home Assistant</b>.</li>
+            <li>Open the OpenScooter app → <b>Home Assistant</b>.</li>
             <li>Tap <b>Scan QR code</b> and scan this code.</li>
           </ol>
           <div style="height:14px"></div>
@@ -80,8 +80,8 @@ class OpenScooterPanel extends HTMLElement {
       const recent = seen && Date.now() - seen.getTime() < 10 * 60 * 1000;
       this._el.dot.className = "dot" + (recent ? " on" : "");
       this._el.status.textContent = seen
-        ? (recent ? "App connected" : "App last seen " + seen.toLocaleString()) + (r.battery != null ? " ?? battery " + r.battery + " %" : "")
-        : "Waiting for the app???";
+        ? (recent ? "App connected" : "App last seen " + seen.toLocaleString()) + (r.battery != null ? " · battery " + r.battery + " %" : "")
+        : "Waiting for the app…";
     } catch (e) {
       this._el.status.textContent = "Could not load pairing data: " + (e.message || e);
     }
