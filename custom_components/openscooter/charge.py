@@ -39,8 +39,6 @@ _LOGGER = logging.getLogger(__name__)
 STALE_BATTERY_H = 12
 TICK = timedelta(seconds=15)
 BACKFILL = timedelta(hours=12)       # how far back the real charge start is searched
-END_FRACTION = 0.12                # the charger is done when power falls under this share of the session's peak
-END_MAX_W = 30.0
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
@@ -632,9 +630,7 @@ class ChargeManager:
             s["curve"].append([round((now - started).total_seconds() / 60.0, 1), round(s["energy"], 4), round(power, 1)])
             s["curve_ts"] = now.isoformat()
 
-        # "Done" = power under the larger of your setting and 12 % of this charge's peak (a 100 W brick: about 12 W, which is
-        # where its green light comes on); the brick then only idles or trickles, so waiting longer adds almost nothing.
-        off_w = min(END_MAX_W, max(float(self._o.get(CONF_OFF_W, DEFAULT_OFF_W)), END_FRACTION * float(s.get("peak_w", 0.0))))
+        off_w = float(self._o.get(CONF_OFF_W, DEFAULT_OFF_W))
         off_min = float(self._o.get(CONF_OFF_MIN, DEFAULT_OFF_MIN))
 
         # Finished: power under the threshold for long enough (an unavailable sensor never counts as "low").

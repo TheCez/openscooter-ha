@@ -85,7 +85,3 @@ Details that follow from this:
 When a charge ends (full, or at your target) Home Assistant reports it as **Charged / Fully charged** and stores the end level as an **estimate** (`end_source: estimate`). That estimate is also what the app shows while the scooter is off, marked *estimated*.
 
 When you switch the scooter on, the first level it reports (if it has not been ridden in between) is compared with that estimate: both are kept in the charge history (`real_percent`, `error`), the event `openscooter_charge_verified` fires, and the charge model learns from the real end level, including what your scooter's gauge reads when full (`Level when full`). `Charge estimate error` shows the typical miss of the last charges.
-
-### When does a charge count as finished?
-
-When the plug power stays below the larger of your *Charging has ended below (W)* setting and **12 % of that charge's peak power** (about 12 W for a 100 W brick, which is where such a brick's light turns green) for the configured minutes (default 3). Then the plug is switched off and the charge is stored as *Fully charged*.
