@@ -345,7 +345,10 @@ class ChargeManager:
             self.away_seen = True
         if not self.enabled or self.status not in ("idle", "finished") or home is not True or not self.away_seen:
             return
-        battery = self.hub.data.get("battery")
+        # The best known level, not the raw last reading: after a charge the scooter is off, so its last reading is
+        # the level from BEFORE the charge. Using that would restart the charge that has just finished.
+        best = self.hub.battery_best
+        battery = best["value"] if best else None
         if battery is not None and battery < int(self._o.get(CONF_START_BELOW, DEFAULT_START_BELOW)):
             self.hass.async_create_task(self.async_begin("arrival"))
 
@@ -469,6 +472,7 @@ class ChargeManager:
             "e_start": e, "low_since": None, "curve": [[0.0, round(energy0, 4), round(power, 1)]], "curve_ts": now.isoformat(),
         }
         self.status = "charging"
+        self.away_seen = False
         self._power_ticks = self._plug_off_ticks = self._target_ticks = 0
         self.last_estimate = None
         self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": battery, "started_at": start.isoformat()})
@@ -618,6 +622,7 @@ class ChargeManager:
         self._refit()
         self.last_estimate = end_pct
         self.session = None
+        self.away_seen = False   # no new automatic start until the scooter has left home again
         self.status = "finished"
         self.hass.bus.async_fire(EVENT_CHARGE_FINISHED, {k: v for k, v in rec.items() if k != "curve"})
         self.hub.notify()

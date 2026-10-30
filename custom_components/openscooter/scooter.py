@@ -85,7 +85,7 @@ class ScooterHub:
             return {"value": float(self.data["battery"]), "source": "live", "age_min": 0}
         if c.status == "charging" and c.estimate is not None:
             return {"value": float(c.estimate), "source": "charging estimate", "age_min": 0}
-        if c.status == "finished" and c.last_estimate is not None:
+        if c.status in ("finished", "waiting", "idle") and c.last_estimate is not None:   # until the scooter reports a level again
             return {"value": float(c.last_estimate), "source": "charged (estimated)", "age_min": None}
         if self.data.get("battery") is not None:
             return {"value": float(self.data["battery"]), "source": "last seen", "age_min": self.battery_age_min}
