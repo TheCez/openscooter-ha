@@ -24,6 +24,8 @@ FIELDS = (
 RIDE_KEYS = ("id", "start", "end", "dist", "moving", "max", "avg", "b0", "b1")
 MAX_RIDES = 3000
 MAX_SEGMENTS = 50000
+MAX_TRACKS = 300
+MAX_TRACK_POINTS = 800
 
 
 class ScooterHub:
@@ -41,6 +43,8 @@ class ScooterHub:
         self.rides: dict[str, dict[str, Any]] = {}
         self.segments: list[str] = []
         self._seg_keys: set[str] = set()
+        self.tstore: Store = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.tracks")
+        self.tracks: dict[str, list] = {}   # ride id -> [[lat, lon, time_ms, kmh], ...] (thinned by the app)
         self.model: dict[str, Any] = {}
         self.data_synced: datetime | None = None
 
@@ -60,6 +64,7 @@ class ScooterHub:
         self.segments = d.get("segments", [])
         self._seg_keys = {r.split(",", 1)[0] for r in self.segments}
         self.model = d.get("model", {})
+        self.tracks = (await self.tstore.async_load() or {}).get("tracks", {})
         if (ts := d.get("synced")):
             self.data_synced = dt_util.parse_datetime(ts)
 
@@ -145,6 +150,28 @@ class ScooterHub:
         return added
 
     @callback
+    def merge_track(self, data: Any) -> bool:
+        """Store the GPS route of one ride (what the map in the panel and the GPX export use)."""
+        if not isinstance(data, dict) or "id" not in data or not isinstance(data.get("points"), list):
+            return False
+        pts = []
+        for p in data["points"][:MAX_TRACK_POINTS]:
+            if isinstance(p, list) and len(p) >= 2:
+                try:
+                    pts.append([float(p[0]), float(p[1]), int(p[2]) if len(p) > 2 else 0, float(p[3]) if len(p) > 3 else 0.0])
+                except (TypeError, ValueError):
+                    continue
+        if len(pts) < 2:
+            return False
+        self.tracks[str(data["id"])] = pts
+        if len(self.tracks) > MAX_TRACKS:
+            for k in sorted(self.tracks, key=lambda x: int(x) if x.isdigit() else 0)[: len(self.tracks) - MAX_TRACKS]:
+                self.tracks.pop(k, None)
+        self.tstore.async_delay_save(lambda: {"tracks": self.tracks}, 30)
+        self.notify()
+        return True
+
+    @callback
     def set_model(self, model: Any) -> None:
         if isinstance(model, dict):
             self.model = model
@@ -153,4 +180,4 @@ class ScooterHub:
     def restore_payload(self) -> dict[str, Any]:
         """Everything a fresh install needs to continue where the old one stopped."""
         return {"rides": list(self.rides.values()), "segments": self.segments, "model": self.model,
-                "charges": self.charge.history[-60:]}
+                "charges": self.charge.history[-60:], "tracks": self.tracks}

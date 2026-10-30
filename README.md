@@ -40,3 +40,13 @@ Home Assistant is also the database of the app. The app sends it, automatically:
 - a small **model summary**, and the **estimated range** for the current mode (`sensor.openscooter_estimated_range`, with a low/high interval).
 
 After a reinstall or on a new phone, pair again and the app restores everything (or use *Restore from Home Assistant* in the app) and relearns from the stored observations. Charges are stored with their per-minute power curve and synced to the phone for analysis.
+
+## Routes
+
+The app also sends the GPS route of each ride (thinned to at most 500 points) and Home Assistant stores the last 300. See them in the **OpenScooter** sidebar panel (ride list, map, *Download GPX*) or add a dashboard card:
+
+```yaml
+type: custom:openscooter-route-card
+```
+
+The map uses OpenStreetMap tiles (internet needed to load the background).

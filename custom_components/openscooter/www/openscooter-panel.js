@@ -1,4 +1,5 @@
 import qrcode from "./qrcode.mjs";
+import { drawRoute, toGpx } from "./openscooter-map.js";
 
 /* Sidebar panel: pair the OpenScooter app. The link uses the address this page was opened with,
    so opening Home Assistant through the public URL gives a public (works-anywhere) QR code. */
@@ -37,6 +38,12 @@ class OpenScooterPanel extends HTMLElement {
       <div class="wrap">
         <h1>OpenScooter</h1>
         <div class="sub">Pair the app with this Home Assistant</div>
+        <div class="card" id="ridescard">
+          <b>Rides</b>
+          <div id="ridemap" style="height:260px;border-radius:10px;margin:12px 0" hidden></div>
+          <div class="row" id="rideactions" hidden><button id="gpx" class="sec">Download GPX</button></div>
+          <div id="rides" style="margin-top:8px;font-size:14px"></div>
+        </div>
         <div class="card">
           <div class="status"><span class="dot" id="dot"></span><span id="status">Waiting for the app…</span></div>
         </div>
@@ -67,6 +74,14 @@ class OpenScooterPanel extends HTMLElement {
     });
     this._el.open.addEventListener("click", () => { window.location.href = this._link(); });   // on the phone: opens the app and pairs
     this._timer = setInterval(() => this._load(true), 5000);
+    this._el.rides = $("rides"); this._el.ridemap = $("ridemap"); this._el.rideactions = $("rideactions");
+    $("gpx").addEventListener("click", () => {
+      if (!this._cur) return;
+      const blob = new Blob([toGpx("OpenScooter ride", this._cur.points)], { type: "application/gpx+xml" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+      a.download = `openscooter-${new Date(this._cur.ride.start).toISOString().slice(0, 10)}.gpx`; a.click();
+    });
+    this._loadRides();
   }
 
   disconnectedCallback() { clearInterval(this._timer); }
@@ -85,6 +100,25 @@ class OpenScooterPanel extends HTMLElement {
     } catch (e) {
       this._el.status.textContent = "Could not load pairing data: " + (e.message || e);
     }
+  }
+
+  async _loadRides() {
+    try {
+      const r = await this._hass.callWS({ type: "openscooter/rides", limit: 30 });
+      this._el.rides.innerHTML = r.rides.length ? "" : '<span style="color:var(--secondary-text-color)">No rides synced yet. They are sent by the app automatically.</span>';
+      for (const ride of r.rides) {
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--divider-color);cursor:" + (ride.has_track ? "pointer" : "default");
+        row.innerHTML = `<span>${new Date(ride.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span><span>${(ride.dist / 1000).toFixed(1)} km${ride.has_track ? " · map" : ""}</span>`;
+        if (ride.has_track) row.addEventListener("click", async () => {
+          const t = await this._hass.callWS({ type: "openscooter/track", id: ride.id });
+          this._cur = { ride, points: t.points };
+          this._el.ridemap.hidden = false; this._el.rideactions.hidden = false;
+          drawRoute(this._el.ridemap, t.points);
+        });
+        this._el.rides.appendChild(row);
+      }
+    } catch (e) { this._el.rides.textContent = "Could not load rides: " + (e.message || e); }
   }
 
   _link() {

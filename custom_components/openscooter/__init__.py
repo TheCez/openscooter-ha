@@ -41,6 +41,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return web.json_response({"ok": True, "version": VERSION, "sessions": c.history[-60:]})
         if kind == "restore":
             return web.json_response({"ok": True, "version": VERSION, **hub.restore_payload()})
+        if kind == "track":
+            ok = hub.merge_track(body.get("data"))
+            return web.json_response({"ok": True, "version": VERSION, "stored": ok, "tracks": len(hub.tracks)})
         if kind in ("rides", "segments", "model"):
             if kind == "rides":
                 added = hub.merge_rides(body.get("data"))
@@ -67,6 +70,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         add_extra_js_url(hass, f"{STATIC_URL}/openscooter-card.js?v={VERSION}")
         websocket_api.async_register_command(hass, ws_pairing)
         websocket_api.async_register_command(hass, ws_sessions)
+        websocket_api.async_register_command(hass, ws_rides)
+        websocket_api.async_register_command(hass, ws_track)
     await panel_custom.async_register_panel(
         hass, frontend_url_path="openscooter", webcomponent_name="openscooter-panel",
         sidebar_title="OpenScooter", sidebar_icon="mdi:scooter",
@@ -130,3 +135,31 @@ def ws_sessions(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
             connection.send_result(msg["id"], {"sessions": rows, "current": hub.charge.snapshot()})
             return
     connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
+
+
+def _hub(hass: HomeAssistant):
+    return next((h for h in hass.data.get(DOMAIN, {}).values() if isinstance(h, ScooterHub)), None)
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openscooter/rides", vol.Optional("limit", default=100): int})
+@callback
+def ws_rides(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Ride summaries, newest first (for the route card and the panel). `has_track` tells if a route is stored."""
+    hub = _hub(hass)
+    if hub is None:
+        connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
+        return
+    rows = sorted(hub.rides.values(), key=lambda r: r.get("start") or 0, reverse=True)[: msg["limit"]]
+    connection.send_result(msg["id"], {"rides": [{**r, "has_track": str(r["id"]) in hub.tracks} for r in rows]})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openscooter/track", vol.Required("id"): vol.Any(int, str)})
+@callback
+def ws_track(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """The GPS route of one ride: [[lat, lon, time_ms, kmh], ...]."""
+    hub = _hub(hass)
+    pts = hub.tracks.get(str(msg["id"])) if hub else None
+    if pts is None:
+        connection.send_error(msg["id"], "not_found", "No route stored for this ride")
+        return
+    connection.send_result(msg["id"], {"id": msg["id"], "points": pts})

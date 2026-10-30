@@ -1,3 +1,5 @@
+import { drawRoute } from "./openscooter-map.js";
+
 /* OpenScooter dashboard card. Add it from the card picker ("OpenScooter") or in YAML:
      type: custom:openscooter-card
    Entities are found automatically (sensor.openscooter_battery, ...). If you renamed the device,
@@ -116,3 +118,41 @@ class OpenScooterCard extends HTMLElement {
 customElements.define("openscooter-card", OpenScooterCard);
 window.customCards = window.customCards || [];
 window.customCards.push({ type: "openscooter-card", name: "OpenScooter", description: "Battery, lock, trip and charging status of your scooter", preview: false });
+
+
+/* Route of the last ride on a map. Add it as  type: custom:openscooter-route-card  (optional: height: 260) */
+class OpenScooterRouteCard extends HTMLElement {
+  static getStubConfig() { return {}; }
+  setConfig(config) { this._config = config || {}; }
+  getCardSize() { return 5; }
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._root) {
+      this._root = this.attachShadow({ mode: "open" });
+      this._root.innerHTML = `<style>ha-card{padding:0;overflow:hidden}.map{height:${(this._config && this._config.height) || 260}px}
+        .info{padding:12px 16px;display:flex;justify-content:space-between;gap:8px;font-size:14px}.sub{color:var(--secondary-text-color);font-size:12px}
+        .empty{padding:16px;color:var(--secondary-text-color)}</style>
+        <ha-card><div class="map" id="map"></div><div class="info" id="info"></div></ha-card>`;
+      this._last = null;
+    }
+    const sensor = hass.states[`sensor.${(this._config && this._config.prefix) || "openscooter"}_last_ride`];
+    const key = sensor ? sensor.state : "none";
+    if (key !== this._last) { this._last = key; this._load(); }
+  }
+  async _load() {
+    const info = this._root.getElementById("info"), map = this._root.getElementById("map");
+    try {
+      const r = await this._hass.callWS({ type: "openscooter/rides", limit: 20 });
+      const ride = r.rides.find((x) => x.has_track);
+      if (!ride) { map.style.display = "none"; info.innerHTML = '<div class="empty">No ride with a GPS route has been synced yet.</div>'; return; }
+      const t = await this._hass.callWS({ type: "openscooter/track", id: ride.id });
+      map.style.display = "";
+      drawRoute(map, t.points);
+      const km = (ride.dist / 1000).toFixed(1), mins = Math.round((ride.end - ride.start) / 60000);
+      info.innerHTML = `<div><b>${km} km</b><div class="sub">${new Date(ride.start).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</div></div>` +
+        `<div style="text-align:right">${mins} min<div class="sub">${ride.b0 >= 0 && ride.b1 >= 0 ? "battery " + ride.b0 + "% → " + ride.b1 + "%" : ""}</div></div>`;
+    } catch (e) { info.innerHTML = '<div class="empty">Could not load the route.</div>'; }
+  }
+}
+customElements.define("openscooter-route-card", OpenScooterRouteCard);
+window.customCards.push({ type: "openscooter-route-card", name: "OpenScooter route", description: "Route of the last ride on a map", preview: false });
