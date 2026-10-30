@@ -68,7 +68,34 @@ SENSORS: tuple[Desc, ...] = (
     Desc(key="charge_total_kwh", name="Total charge energy", device_class=SensorDeviceClass.ENERGY,
          native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, state_class=SensorStateClass.TOTAL_INCREASING,
          suggested_display_precision=2, value=lambda h: round(h.charge.total_kwh, 3)),
+    Desc(key="range_estimate", name="Estimated range", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
+         state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=1, value=lambda h: _d(h, "range_km")),
+    Desc(key="range_full", name="Range on a full battery", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
+         suggested_display_precision=1, value=lambda h: _d(h, "range_full_km")),
+    Desc(key="range_error", name="Range model error", native_unit_of_measurement=PERCENTAGE, suggested_display_precision=1,
+         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: _d(h, "range_error_pct")),
+    Desc(key="range_samples", name="Range model observations", state_class=SensorStateClass.TOTAL_INCREASING,
+         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: _d(h, "range_samples")),
+    Desc(key="ride_count", name="Rides", state_class=SensorStateClass.TOTAL_INCREASING, value=lambda h: len(h.rides)),
+    Desc(key="ride_distance_total", name="Distance ridden (synced rides)", device_class=SensorDeviceClass.DISTANCE,
+         native_unit_of_measurement=UnitOfLength.KILOMETERS, state_class=SensorStateClass.TOTAL_INCREASING, suggested_display_precision=1,
+         value=lambda h: round(sum(float(r.get("dist") or 0) for r in h.rides.values()) / 1000.0, 2)),
+    Desc(key="last_ride", name="Last ride", device_class=SensorDeviceClass.TIMESTAMP, value=lambda h: _last_ride_end(h)),
+    Desc(key="data_segments", name="Stored range observations", entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: len(h.segments)),
+    Desc(key="data_synced", name="Data last synced", device_class=SensorDeviceClass.TIMESTAMP, entity_category=EntityCategory.DIAGNOSTIC,
+         value=lambda h: h.data_synced),
 )
+
+
+def _last_ride(h: ScooterHub):
+    if not h.rides:
+        return None
+    return max(h.rides.values(), key=lambda r: r.get("end") or 0)
+
+
+def _last_ride_end(h: ScooterHub):
+    r = _last_ride(h)
+    return dt_util.utc_from_timestamp(float(r["end"]) / 1000.0) if r and r.get("end") else None
 
 
 async def async_setup_entry(hass, entry, async_add_entities) -> None:
@@ -93,4 +120,13 @@ class ScooterSensor(ScooterEntity, SensorEntity):
             c = self.hub.charge
             return {"target_percent": c.target, "smart_charging": c.enabled, "last_session": c.last_session,
                     "recent_sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-10:]]}
+        if self.entity_description.key == "range_estimate":
+            d = self.hub.data
+            return {"low_km": d.get("range_low_km"), "high_km": d.get("range_high_km"), "mode": d.get("mode"),
+                    "model_observations": d.get("range_samples"), "model_error_percent": d.get("range_error_pct")}
+        if self.entity_description.key == "last_ride":
+            r = _last_ride(self.hub)
+            if r:
+                return {"distance_km": round(float(r.get("dist") or 0) / 1000.0, 2), "moving_s": r.get("moving"),
+                        "avg_kmh": r.get("avg"), "max_kmh": r.get("max"), "battery_start": r.get("b0"), "battery_end": r.get("b1")}
         return None

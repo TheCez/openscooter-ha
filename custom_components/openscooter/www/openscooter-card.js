@@ -70,6 +70,8 @@ class OpenScooterCard extends HTMLElement {
     const seen = this._s("sensor", "last_seen");
     let state = conn && conn.state === "on" ? "Connected" : "Not connected";
     if (!(conn && conn.state === "on") && seen) state += " · last seen " + new Date(seen.state).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+    const rng = this._s("sensor", "estimated_range");
+    if (rng && !isNaN(Number(rng.state))) state += " · range ~" + Number(rng.state).toFixed(0) + " km";
     this._q("state").textContent = state;
 
     const unlocked = this._s("binary_sensor", "unlocked");

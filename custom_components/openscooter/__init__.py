@@ -33,11 +33,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return web.json_response({"ok": False, "error": "bad json"}, status=400)
         if not isinstance(body, dict) or not hmac.compare_digest(str(body.get("secret", "")), entry.data[CONF_SECRET]):
             return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
-        if body.get("type") == "state" and isinstance(body.get("data"), dict):
+        kind = body.get("type")
+        if kind == "state" and isinstance(body.get("data"), dict):
             hub.update(body["data"])
         c = hub.charge
-        if body.get("type") == "sessions":
+        if kind == "sessions":
             return web.json_response({"ok": True, "version": VERSION, "sessions": c.history[-60:]})
+        if kind == "restore":
+            return web.json_response({"ok": True, "version": VERSION, **hub.restore_payload()})
+        if kind in ("rides", "segments", "model"):
+            if kind == "rides":
+                added = hub.merge_rides(body.get("data"))
+            elif kind == "segments":
+                added = hub.merge_segments(body.get("data"))
+            else:
+                hub.set_model(body.get("data"))
+                added = 0
+            return web.json_response({"ok": True, "version": VERSION, "added": added,
+                                      "rides": len(hub.rides), "segments": len(hub.segments)})
         return web.json_response({
             "ok": True, "version": VERSION,
              "charge": c.snapshot(),
