@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+STALE_BATTERY_H = 12
 TICK = timedelta(seconds=15)
 BACKFILL = timedelta(hours=12)       # how far back the real charge start is searched
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
@@ -378,9 +379,15 @@ class ChargeManager:
         start, energy0, e_hist = await self._real_start(now, power)
         e = e_hist if e_hist is not None else self._float_state(self._o.get(CONF_ENERGY))
         battery = self.hub.data.get("battery")
+        seen = self.hub.battery_ts
+        age_h = (start - seen).total_seconds() / 3600.0 if seen else None
+        if battery is not None and (age_h is None or age_h > STALE_BATTERY_H):
+            _LOGGER.info("Battery level %s %% is too old to be the start of this charge; it is inferred afterwards", battery)
+            battery = None   # unknown beats wrong: the model infers it from the energy when the charge is done
         self.session = {
             "start": start.isoformat(), "start_percent": battery,
             "start_source": "scooter" if battery is not None else None,
+            "start_percent_age_min": round(age_h * 60) if age_h is not None and battery is not None else None,
             "energy": energy0, "last_ts": now.isoformat(), "last_power": power, "peak_w": power,
             "e_start": e, "low_since": None, "curve": [[0.0, round(energy0, 4), round(power, 1)]], "curve_ts": now.isoformat(),
         }
@@ -503,6 +510,7 @@ class ChargeManager:
 
     # ---- the 15 s evaluation -------------------------------------------------------------------
     async def _tick(self, _now=None) -> None:
+        self.hub.check_connection()
         power = self._float_state(self._o.get(CONF_POWER))
         now = dt_util.utcnow()
 

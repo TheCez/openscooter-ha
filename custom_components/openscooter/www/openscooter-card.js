@@ -59,13 +59,14 @@ class OpenScooterCard extends HTMLElement {
   _q(id) { return this._root.getElementById(id); }
 
   _render() {
-    const batt = this._s("sensor", "battery");
+    const batt = this._s("sensor", "best_known_battery") || this._s("sensor", "battery");
     const est = this._s("sensor", "battery_estimate");
     const charge = this._s("sensor", "charge_status");
     const charging = charge && charge.state === "charging";
-    const value = charging && est ? Number(est.state) : batt ? Number(batt.state) : null;
+    const value = batt ? Number(batt.state) : null;
+    const source = batt && batt.attributes ? batt.attributes.source : null;
     this._q("pct").textContent = value == null || isNaN(value) ? "–" : Math.round(value) + "%";
-    this._q("pctl").textContent = charging ? "charging" : "battery";
+    this._q("pctl").textContent = charging ? "charging" : source === "last seen" ? "last seen" : "battery";
     this._q("arc").setAttribute("stroke-dashoffset", String(263.9 * (1 - Math.max(0, Math.min(100, value || 0)) / 100)));
 
     const conn = this._s("binary_sensor", "connected");

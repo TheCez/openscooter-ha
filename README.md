@@ -60,3 +60,22 @@ type: custom:openscooter-charge-card
 ```
 
 A live ring with the estimated level and your target, start time, start level, power, energy and time left, the power curve of the running (or last) charge, the recent charges and what has been learned. Options: `history: 5` (rows), `prefix` (if you renamed the device). All charging data is collected by Home Assistant from the smart plug, so it works with or without the phone app; the app only adds the battery level at the start of a charge.
+
+## Who does what
+
+**Home Assistant is the brain and the database. The phone is a sensor and a screen.**
+
+| Works without the phone | Needs the phone (Bluetooth to the scooter) |
+| --- | --- |
+| Charge tracking: start time, energy, power curve, finish detection, plug off (from the smart plug and the recorder history) | Live scooter data: speed, lock, light, mode, temperatures, trip |
+| Charge model, live battery estimate and time left while charging | The battery level *at the start* of a charge (the last level the app saw) |
+| **Best known battery** (`sensor.openscooter_best_known_battery`): live, else the charge estimate, else the level it was charged to, else the last level seen, with its source and age | Ride recording and GPS routes |
+| **Range** (`estimated_range`, `range_eco/drive/sport`, `range_full`): learned in Home Assistant from the stored observations and applied to the best known battery, so it is correct while the scooter charges or the phone is away | Range observations (one per 1 % of battery) |
+| Ride, route and charge history, GPX download, dashboard cards, automations | Starting a charge on arrival at home (needs the phone's position) |
+
+Details that follow from this:
+
+- *Connected* expires by itself if the phone stops reporting for 3 minutes (a closed app no longer looks connected for ever).
+- A battery level older than 12 hours is not used as the start of a charge; the model infers it from the energy afterwards.
+- Without the phone you can still start a charge with the *Smart charging* switch, the `openscooter.start_charge` service, a schedule, or simply by turning the plug on: Home Assistant notices the power and takes over.
+- The phone also keeps its own copy of everything (and its own instant range model) so the app works offline; after a reinstall it restores from Home Assistant.

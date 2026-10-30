@@ -68,14 +68,22 @@ SENSORS: tuple[Desc, ...] = (
     Desc(key="charge_total_kwh", name="Total charge energy", device_class=SensorDeviceClass.ENERGY,
          native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, state_class=SensorStateClass.TOTAL_INCREASING,
          suggested_display_precision=2, value=lambda h: round(h.charge.total_kwh, 3)),
+    Desc(key="best_battery", name="Best known battery", device_class=SensorDeviceClass.BATTERY, native_unit_of_measurement=PERCENTAGE,
+         suggested_display_precision=0, value=lambda h: (h.battery_best or {}).get("value")),
     Desc(key="range_estimate", name="Estimated range", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
-         state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=1, value=lambda h: _d(h, "range_km")),
+         state_class=SensorStateClass.MEASUREMENT, suggested_display_precision=1, value=lambda h: h.range_for()),
+    Desc(key="range_eco", name="Range eco", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
+         suggested_display_precision=1, value=lambda h: h.range_for("eco")),
+    Desc(key="range_drive", name="Range drive", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
+         suggested_display_precision=1, value=lambda h: h.range_for("drive")),
+    Desc(key="range_sport", name="Range sport", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
+         suggested_display_precision=1, value=lambda h: h.range_for("sport")),
     Desc(key="range_full", name="Range on a full battery", device_class=SensorDeviceClass.DISTANCE, native_unit_of_measurement=UnitOfLength.KILOMETERS,
-         suggested_display_precision=1, value=lambda h: _d(h, "range_full_km")),
+         suggested_display_precision=1, value=lambda h: h.range_for(full=True)),
     Desc(key="range_error", name="Range model error", native_unit_of_measurement=PERCENTAGE, suggested_display_precision=1,
-         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: _d(h, "range_error_pct")),
+         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: h.range.error_pct),
     Desc(key="range_samples", name="Range model observations", state_class=SensorStateClass.TOTAL_INCREASING,
-         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: _d(h, "range_samples")),
+         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: h.range.samples),
     Desc(key="ride_count", name="Rides", state_class=SensorStateClass.TOTAL_INCREASING, value=lambda h: len(h.rides)),
     Desc(key="ride_distance_total", name="Distance ridden (synced rides)", device_class=SensorDeviceClass.DISTANCE,
          native_unit_of_measurement=UnitOfLength.KILOMETERS, state_class=SensorStateClass.TOTAL_INCREASING, suggested_display_precision=1,
@@ -120,10 +128,13 @@ class ScooterSensor(ScooterEntity, SensorEntity):
             c = self.hub.charge
             return {"target_percent": c.target, "smart_charging": c.enabled, "last_session": c.last_session,
                     "recent_sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-10:]]}
+        if self.entity_description.key == "best_battery":
+            b = self.hub.battery_best or {}
+            return {"source": b.get("source"), "age_minutes": b.get("age_min"), "scooter_connected": self.hub.connected}
         if self.entity_description.key == "range_estimate":
-            d = self.hub.data
-            return {"low_km": d.get("range_low_km"), "high_km": d.get("range_high_km"), "mode": d.get("mode"),
-                    "model_observations": d.get("range_samples"), "model_error_percent": d.get("range_error_pct")}
+            best = self.hub.battery_best or {}
+            return {"mode": self.hub.data.get("mode") or "drive", "battery_used": best.get("value"), "battery_source": best.get("source"),
+                    **self.hub.range.summary()}
         if self.entity_description.key == "last_ride":
             r = _last_ride(self.hub)
             if r:

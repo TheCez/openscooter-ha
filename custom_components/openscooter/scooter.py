@@ -11,6 +11,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .charge import ChargeManager
+from .rangemodel import RangeModel
 from .const import DOMAIN, SIGNAL_UPDATE
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ FIELDS = (
 RIDE_KEYS = ("id", "start", "end", "dist", "moving", "max", "avg", "b0", "b1")
 MAX_RIDES = 3000
 MAX_SEGMENTS = 50000
+CONNECTED_TIMEOUT = 180   # seconds: the app sends at least every minute; silence means the phone is gone
+STALE_BATTERY_H = 12      # a battery level older than this is not trusted as the start of a charge
 KEEP_FULL_TRACKS = 10     # complete routes kept for the newest rides
 SKETCH_POINTS = 60        # older rides keep only a simplified route (summaries stay forever)
 MAX_SKETCHES = 3000
@@ -35,10 +38,13 @@ class ScooterHub:
         self.hass = hass
         self.entry = entry
         self.data: dict[str, Any] = {}
-        self.connected = False
+        self._connected = False
+        self._conn_state = False
+        self.battery_ts: datetime | None = None
         self.last_seen: datetime | None = None
         self.store: Store = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}")
         self.charge = ChargeManager(self)
+        self.range = RangeModel()
         # The database part: every ride, every range-learning observation and the latest model of the app.
         # Kept in its own file so it can grow without slowing the live state down.
         self.dstore: Store = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.data")
@@ -52,13 +58,57 @@ class ScooterHub:
         self.data_synced: datetime | None = None
 
     @property
+    def connected(self) -> bool:
+        """The scooter is connected to the phone *and* the phone is still talking to us (no stale "connected")."""
+        if not self._connected or self.last_seen is None:
+            return False
+        return (dt_util.utcnow() - self.last_seen).total_seconds() < CONNECTED_TIMEOUT
+
+    @callback
+    def check_connection(self) -> None:
+        """Called by the 15 s tick: tell the entities when "connected" expired without any message arriving."""
+        now = self.connected
+        if now != self._conn_state:
+            self._conn_state = now
+            self.notify()
+
+    @property
+    def battery_age_min(self) -> float | None:
+        return round((dt_util.utcnow() - self.battery_ts).total_seconds() / 60.0) if self.battery_ts else None
+
+    @property
+    def battery_best(self) -> dict[str, Any] | None:
+        """The best known battery level and where it comes from: live from the scooter, the charge estimate while it
+        charges (works without the phone), the level it was charged to, or the last level seen."""
+        c = self.charge
+        if self.connected and self.data.get("battery") is not None:
+            return {"value": float(self.data["battery"]), "source": "live", "age_min": 0}
+        if c.status == "charging" and c.estimate is not None:
+            return {"value": float(c.estimate), "source": "charging estimate", "age_min": 0}
+        if c.status == "finished" and c.last_estimate is not None:
+            return {"value": float(c.last_estimate), "source": "charged", "age_min": None}
+        if self.data.get("battery") is not None:
+            return {"value": float(self.data["battery"]), "source": "last seen", "age_min": self.battery_age_min}
+        return None
+
+    def range_for(self, mode: str | None = None, full: bool = False) -> float | None:
+        """Range in km for a mode (default: the last known mode) on the best known battery (or 100 %)."""
+        mode = mode or self.data.get("mode") or "drive"
+        if full:
+            return self.range.range_km(100, mode)
+        best = self.battery_best
+        return self.range.range_km(best["value"], mode) if best else None
+
+    @property
     def signal(self) -> str:
         return SIGNAL_UPDATE.format(self.entry.entry_id)
 
     async def async_load(self) -> None:
         saved = await self.store.async_load() or {}
         self.data = saved.get("data", {})
-        self.connected = False  # never trust "connected" after a restart
+        self._connected = False  # never trust "connected" after a restart
+        if (ts := saved.get("battery_ts")):
+            self.battery_ts = dt_util.parse_datetime(ts)
         if (ts := saved.get("last_seen")):
             self.last_seen = dt_util.parse_datetime(ts)
         self.charge.load(saved.get("charge", {}))
@@ -67,6 +117,7 @@ class ScooterHub:
         self.segments = d.get("segments", [])
         self._seg_keys = {r.split(",", 1)[0] for r in self.segments}
         self.model = d.get("model", {})
+        self.range.fit(self.segments)
         td = await self.tstore.async_load() or {}
         self.tracks = td.get("tracks", {})
         self.sketches = td.get("sketches", {})
@@ -78,6 +129,7 @@ class ScooterHub:
         return {
             "data": self.data,
             "last_seen": self.last_seen.isoformat() if self.last_seen else None,
+            "battery_ts": self.battery_ts.isoformat() if self.battery_ts else None,
             "charge": self.charge.dump(),
         }
 
@@ -95,9 +147,11 @@ class ScooterHub:
         for key in FIELDS:
             if payload.get(key) is not None:
                 self.data[key] = payload[key]
-        self.connected = bool(payload.get("connected", False))
+        self._connected = bool(payload.get("connected", False))
         self.last_seen = dt_util.utcnow()
-        if self.connected:
+        if self._connected and payload.get("battery") is not None:
+            self.battery_ts = self.last_seen
+        if self._connected:
             self.charge.on_fresh_battery()
         self.notify()
         self.charge.on_scooter_update()
@@ -152,6 +206,7 @@ class ScooterHub:
             self._seg_keys = {r.split(",", 1)[0] for r in self.segments}
         if added:
             self.segments.sort(key=lambda r: int(float(r.split(",", 1)[0])) if r.split(",", 1)[0].replace(".", "", 1).isdigit() else 0)
+            self.hass.async_add_executor_job(self.range.fit, list(self.segments))
         self._data_changed()
         return added
 
