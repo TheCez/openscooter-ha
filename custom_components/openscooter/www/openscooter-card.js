@@ -109,8 +109,9 @@ class OpenScooterCard extends HTMLElement {
       } else if (charge.state === "waiting") text = "Plug on, waiting for the charger to draw power";
       else if (charge.state === "finished" && a.last_session) {
         const l = a.last_session;
-        text = "Charged" + (l.end_percent != null ? " to " + Math.round(l.end_percent) + "%" : "") + " · " +
-          Number(l.energy_kwh).toFixed(2) + " kWh in " + hm(l.duration_min);
+        text = "Charged" + (l.end_percent != null ? " to " + Math.round(l.end_percent) + "% (estimated)" : "") + " · " +
+          Number(l.energy_kwh).toFixed(2) + " kWh in " + hm(l.duration_min) +
+          (l.real_percent != null ? " · the scooter reported " + Math.round(l.real_percent) + "%" : "");
       } else if (a.smart_charging) text = "Smart charging ready";
     }
     this._q("charge").textContent = text;
@@ -258,7 +259,7 @@ class OpenScooterChargeCard extends HTMLElement {
 
     let value = null, label = "battery";
     if (charging && c.estimate != null) { value = c.estimate; label = "estimated"; }
-    else if (done && last && last.end_percent != null) { value = last.end_percent; label = "charged"; }
+    else if (done && last && last.end_percent != null) { value = last.real_percent != null ? last.real_percent : last.end_percent; label = last.real_percent != null ? "scooter says" : "charged (est.)"; }
     else { const b = this._hass.states[`sensor.${(this._config && this._config.prefix) || "openscooter"}_battery`]; if (b && !isNaN(Number(b.state))) { value = Number(b.state); label = "last seen"; } }
     $("pct").textContent = value == null ? "–" : (charging ? "~" : "") + Math.round(value) + "%";
     $("pctl").textContent = label;
@@ -270,7 +271,7 @@ class OpenScooterChargeCard extends HTMLElement {
 
     $("status").textContent = charging ? "Charging since " + (c.started_at ? at(c.started_at) : "–")
       : waiting ? "Plug on, waiting for the charger to draw power"
-      : done && last ? "Charged to " + Math.round(last.end_percent ?? 100) + "% · " + Number(last.energy_kwh).toFixed(2) + " kWh"
+      : done && last ? (last.reason === "taper" ? "Fully charged" : "Charged") + " to " + Math.round(last.end_percent ?? 100) + "%" + (last.real_percent != null ? "" : " (estimated)") + " · " + Number(last.energy_kwh).toFixed(2) + " kWh"
       : c.enabled ? "Smart charging ready" : "Smart charging is off";
     const pill = $("pill");
     pill.textContent = charging ? "Charging" : waiting ? "Plug on" : done ? "Charged" : "Idle";

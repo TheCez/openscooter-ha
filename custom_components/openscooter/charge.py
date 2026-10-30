@@ -66,6 +66,8 @@ class ChargeManager:
         self.total_sessions = 0
         self.model: dict[str, float] | None = None      # {"a","b","n"}
         self.tail_min: float | None = None
+        self.full_level = 100.0                          # what the scooter's gauge shows when full (learned)
+        self.verified_errors: list[float] = []           # real minus estimated end level, recent charges
         self.away_seen = True
         self.last_estimate: float | None = None          # kept after a session until the scooter reports a battery
         self._waiting_since: datetime | None = None
@@ -126,26 +128,49 @@ class ChargeManager:
 
     # ---- charge model --------------------------------------------------------------------------
     def _refit(self) -> None:
-        pts = [(100.0 - float(h["start_percent"]), float(h["energy_kwh"]))
-               for h in self.history[-20:] if h.get("learn") and h.get("start_percent") is not None]
-        tails = [float(h["tail_min"]) for h in self.history[-20:] if h.get("tail_min")]
+        """Learn from the finished charges. A charge that ended at a level the scooter itself reported afterwards
+        (`real_percent`) counts with that real end; a charge that ran to the end of the taper counts as full."""
+        hist = self.history[-20:]
+        fulls = [float(h["real_percent"]) for h in hist
+                 if h.get("reason") == "taper" and h.get("real_percent") is not None and 80.0 <= float(h["real_percent"]) <= 100.0]
+        self.full_level = round(statistics.median(fulls[-5:]), 1) if fulls else 100.0
+        self.verified_errors = [float(h["error"]) for h in hist if h.get("error") is not None][-10:]
+        pts: list[tuple[float, float, float]] = []   # (percent gained, 1 if it ran to full, energy kWh)
+        for h in hist:
+            if h.get("start_percent") is None or h.get("start_source") != "scooter":
+                continue
+            taper = h.get("reason") == "taper"
+            if h.get("real_percent") is not None:
+                end = float(h["real_percent"])
+            elif taper and h.get("learn"):
+                end = self.full_level
+            else:
+                continue
+            x = end - float(h["start_percent"])
+            if x >= MIN_LEARN_GAP and float(h["energy_kwh"]) >= MIN_LEARN_KWH:
+                pts.append((x, 1.0 if taper else 0.0, float(h["energy_kwh"])))
+        tails = [float(h["tail_min"]) for h in hist if h.get("tail_min")]
         self.tail_min = round(statistics.median(tails), 1) if tails else None
         self.model = None
         if not pts:
             return
-        gaps = [g for g, _ in pts]
-        es = [e for _, e in pts]
-        a = 0.0
-        b = statistics.median(e / g for g, e in pts)
-        if len(pts) >= 3 and max(gaps) - min(gaps) >= 10:
-            mg, me = statistics.fmean(gaps), statistics.fmean(es)
-            sxx = sum((g - mg) ** 2 for g in gaps)
-            if sxx > 0:
-                b2 = sum((g - mg) * (e - me) for g, e in pts) / sxx
-                a2 = me - b2 * mg
+        a, b = 0.0, statistics.median(e / x for x, _, e in pts)
+        me = statistics.fmean(e for _, _, e in pts)
+        if len(pts) >= 3:
+            sxx = sum(x * x for x, _, _ in pts); sxt = sum(x * tt for x, tt, _ in pts); stt = sum(tt * tt for _, tt, _ in pts)
+            sxy = sum(x * e for x, _, e in pts); sty = sum(tt * e for _, tt, e in pts)
+            det = sxx * stt - sxt * sxt
+            if abs(det) > 1e-6 * max(1.0, sxx * stt):
+                b2 = (sxy * stt - sty * sxt) / det
+                a2 = (sty * sxx - sxy * sxt) / det
                 if b2 > 0 and 0 <= a2 <= 0.6 * me:      # physically sensible: positive slope, modest offset
                     a, b = a2, b2
         self.model = {"a": a, "b": b, "n": float(len(pts))}
+
+    @property
+    def mean_abs_error(self) -> float | None:
+        e = self.verified_errors
+        return round(sum(abs(x) for x in e) / len(e), 1) if e else None
 
     @property
     def kwh_per_percent(self) -> float | None:
@@ -165,17 +190,19 @@ class ChargeManager:
         if not m:
             return 0.0
         tail = self._tail_e()
-        if soc >= 100 - TAIL_PCT:
-            return tail * (100.0 - soc) / TAIL_PCT
-        return tail + m["b"] * (100.0 - TAIL_PCT - soc)
+        top = self.full_level
+        if soc >= top - TAIL_PCT:
+            return tail * max(0.0, top - soc) / TAIL_PCT
+        return tail + m["b"] * (top - TAIL_PCT - soc)
 
     def _soc_after(self, start: float, energy: float) -> float:
         m = self.model
         r = max(0.0, self._e_to_full(start) - energy)
         tail = self._tail_e()
+        top = self.full_level
         if r >= tail:
-            return 100.0 - TAIL_PCT - (r - tail) / m["b"]
-        return 100.0 - TAIL_PCT * r / tail if tail > 0 else 100.0
+            return top - TAIL_PCT - (r - tail) / m["b"]
+        return top - TAIL_PCT * r / tail if tail > 0 else top
 
     def _minutes_from(self, soc: float, peak_kw: float) -> float:
         """Minutes to charge from [soc] % to full: constant-current part at the session's power, then the tail."""
@@ -191,7 +218,7 @@ class ChargeManager:
         """Battery % now: modelled during a charge, the final value afterwards (until the scooter reports again)."""
         s = self.session
         if self.status == "charging" and s and self.model and s.get("start_percent") is not None:
-            return round(min(100.0, max(float(s["start_percent"]), self._soc_after(float(s["start_percent"]), s["energy"]))), 1)
+            return round(min(self.full_level, max(float(s["start_percent"]), self._soc_after(float(s["start_percent"]), s["energy"]))), 1)
         return self.last_estimate
 
     @property
@@ -203,10 +230,11 @@ class ChargeManager:
         if soc is None:
             return None
         peak = max(float(s.get("peak_w", 0.0)), MIN_ON_W) / 1000.0
-        goal = float(self.target) if self.model_sessions >= STOP_MODEL_SESSIONS and self.target < 100 else 100.0
+        top = self.full_level
+        goal = float(self.target) if self.model_sessions >= STOP_MODEL_SESSIONS and self.target < top else top
         if soc >= goal:
             return 0.0
-        return round(max(0.0, self._minutes_from(soc, peak) - (self._minutes_from(goal, peak) if goal < 100 else 0.0)), 0)
+        return round(max(0.0, self._minutes_from(soc, peak) - (self._minutes_from(goal, peak) if goal < top else 0.0)), 0)
 
     @property
     def power_w(self) -> float | None:
@@ -238,6 +266,7 @@ class ChargeManager:
             "remaining_min": self.remaining_min,
             "kwh_per_percent": self.kwh_per_percent,
             "model_sessions": self.model_sessions, "total_sessions": self.total_sessions,
+            "full_level": self.full_level, "estimate_error": self.mean_abs_error,
             "last": self.last_session,
         }
 
@@ -266,7 +295,36 @@ class ChargeManager:
             return None
 
     def on_fresh_battery(self) -> None:
+        self.verify_with_scooter()
         self.last_estimate = None  # the scooter itself reported a battery level again
+
+    def verify_with_scooter(self) -> None:
+        """The scooter was switched on after a charge: its own level is the truth. Compare it with the estimate that
+        was stored when the charge ended, keep both, and learn from the difference."""
+        if self.status == "charging" or not self.history:
+            return
+        rec = self.history[-1]
+        if rec.get("real_percent") is not None:
+            return
+        real = self.hub.data.get("battery")
+        odo, odo_end = self.hub.data.get("odometer"), rec.get("odo_end")
+        if real is None or odo is None or odo_end is None or abs(float(odo) - float(odo_end)) > 0.3:
+            return   # not comparable: it has been ridden (or we cannot tell)
+        end = dt_util.parse_datetime(rec["end"])
+        if end is None or dt_util.utcnow() - end > timedelta(hours=24):
+            return
+        real = float(real)
+        if rec.get("reason") == "taper" and real < 80.0:
+            return   # a "full" charge that reads this low is a gauge glitch, not data
+        rec["real_percent"] = real
+        rec["verified_at"] = dt_util.utcnow().isoformat()
+        est = rec.get("end_percent")
+        rec["error"] = round(real - float(est), 1) if est is not None else None
+        _LOGGER.info("Charge verified: estimated %s %%, the scooter reports %s %%", est, real)
+        self._refit()
+        self.hass.bus.async_fire("openscooter_charge_verified", {"estimated": est, "real": real, "error": rec["error"]})
+        self.hub.notify()
+        self.hub.save_soon()
 
     def on_scooter_update(self) -> None:
         home = self._at_home()
@@ -469,15 +527,15 @@ class ChargeManager:
 
         end_pct: float | None = None
         if reason == "taper":
-            end_pct = 100.0
+            end_pct = self.full_level
         elif reason == "target":
             end_pct = float(self.target)
         elif start_pct is not None and self.model:
-            end_pct = round(min(100.0, self._soc_after(float(start_pct), energy)), 1)
+            end_pct = round(min(self.full_level, self._soc_after(float(start_pct), energy)), 1)
 
         learn = False
         if reason == "taper" and start_pct is not None and source == "scooter":
-            gap = 100.0 - float(start_pct)
+            gap = self.full_level - float(start_pct)
             learn = gap >= MIN_LEARN_GAP and energy >= MIN_LEARN_KWH and minutes >= MIN_LEARN_MIN
             if learn and self.model:                       # reject interrupted / odd sessions
                 pred = self.model["a"] + self.model["b"] * gap
@@ -485,14 +543,15 @@ class ChargeManager:
                     learn = False
         elif reason == "taper" and start_pct is None and self.model and energy >= MIN_LEARN_KWH:
             gap = (energy - self.model["a"]) / self.model["b"]          # infer where it started
-            start_pct = round(max(0.0, min(100.0, 100.0 - gap)), 1)
+            start_pct = round(max(0.0, min(100.0, self.full_level - gap)), 1)
             source = "inferred"
 
         rec = {
             "id": s["start"], "start": s["start"], "end": now.isoformat(), "start_percent": start_pct,
             "start_source": source, "end_percent": end_pct, "energy_kwh": energy, "duration_min": round(minutes, 1),
             "peak_w": round(peak, 1), "avg_w": round(energy * 1000.0 / (minutes / 60.0), 1) if minutes > 1 else None,
-            "reason": reason, "learn": learn, "tail_min": tail_min, "curve": curve[-CURVE_MAX * 4:],
+            "reason": reason, "learn": learn, "tail_min": tail_min, "end_source": "estimate",
+            "odo_end": self.hub.data.get("odometer"), "real_percent": None, "error": None, "verified_at": None, "curve": curve[-CURVE_MAX * 4:],
         }
         self.history = (self.history + [rec])[-HISTORY_MAX:]
         for old in self.history[:-30]:
@@ -588,7 +647,7 @@ class ChargeManager:
 
         # "Charge up to X %": only with a trained model, and only after two checks in a row.
         est = self.estimate
-        if est is not None and self.model_sessions >= STOP_MODEL_SESSIONS and self.target < 100:
+        if est is not None and self.model_sessions >= STOP_MODEL_SESSIONS and self.target < self.full_level:
             if est >= self.target:
                 self._target_ticks += 1
                 if self._target_ticks >= 2:

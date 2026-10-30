@@ -79,3 +79,9 @@ Details that follow from this:
 - A battery level older than 12 hours is not used as the start of a charge; the model infers it from the energy afterwards.
 - Without the phone you can still start a charge with the *Smart charging* switch, the `openscooter.start_charge` service, a schedule, or simply by turning the plug on: Home Assistant notices the power and takes over.
 - The phone also keeps its own copy of everything (and its own instant range model) so the app works offline; after a reinstall it restores from Home Assistant.
+
+## After a charge: estimated first, then verified
+
+When a charge ends (full, or at your target) Home Assistant reports it as **Charged / Fully charged** and stores the end level as an **estimate** (`end_source: estimate`). That estimate is also what the app shows while the scooter is off, marked *estimated*.
+
+When you switch the scooter on, the first level it reports (if it has not been ridden in between) is compared with that estimate: both are kept in the charge history (`real_percent`, `error`), the event `openscooter_charge_verified` fires, and the charge model learns from the real end level, including what your scooter's gauge reads when full (`Level when full`). `Charge estimate error` shows the typical miss of the last charges.
