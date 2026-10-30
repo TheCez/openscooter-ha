@@ -71,6 +71,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         websocket_api.async_register_command(hass, ws_pairing)
         websocket_api.async_register_command(hass, ws_sessions)
         websocket_api.async_register_command(hass, ws_rides)
+        websocket_api.async_register_command(hass, ws_charge)
         websocket_api.async_register_command(hass, ws_track)
     await panel_custom.async_register_panel(
         hass, frontend_url_path="openscooter", webcomponent_name="openscooter-panel",
@@ -168,3 +169,25 @@ def ws_track(hass: HomeAssistant, connection: websocket_api.ActiveConnection, ms
         connection.send_error(msg["id"], "not_found", "No route stored for this ride")
         return
     connection.send_result(msg["id"], {"ride_id": msg["ride_id"], "points": pts, "simplified": not full})
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openscooter/charge"})
+@callback
+def ws_charge(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Everything the charging card shows: the running session, the learned model and the recent charges."""
+    hub = _hub(hass)
+    if hub is None:
+        connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
+        return
+    c = hub.charge
+    model = c.model or {}
+    full = (model.get("a", 0.0) + model.get("b", 0.0) * 100.0) if model.get("b") else None
+    last = c.history[-1] if c.history else None
+    connection.send_result(msg["id"], {
+        "current": c.snapshot(),
+        "live_curve": (c.session or {}).get("curve", []),
+        "sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-8:]],
+        "last_curve": (last or {}).get("curve", []),
+        "model": {"kwh_per_percent": c.kwh_per_percent, "full_kwh": full, "sessions": c.model_sessions,
+                  "total_sessions": c.total_sessions, "total_kwh": round(c.total_kwh, 2)},
+    })

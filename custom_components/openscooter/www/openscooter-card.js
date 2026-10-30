@@ -156,3 +156,148 @@ class OpenScooterRouteCard extends HTMLElement {
 }
 customElements.define("openscooter-route-card", OpenScooterRouteCard);
 window.customCards.push({ type: "openscooter-route-card", name: "OpenScooter route", description: "Route of the last ride on a map", preview: false });
+
+
+/* Charging card. Add it as  type: custom:openscooter-charge-card  (optional: prefix, history: 5)
+   Everything comes from Home Assistant itself (the smart plug), so it works with or without the phone app. */
+class OpenScooterChargeCard extends HTMLElement {
+  static getStubConfig() { return {}; }
+  setConfig(config) { this._config = config || {}; }
+  getCardSize() { return 6; }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._root) {
+      this._root = this.attachShadow({ mode: "open" });
+      this._root.innerHTML = `
+        <style>
+          ha-card { padding: 18px; overflow: hidden; position: relative; }
+          .head { display:flex; align-items:center; gap:18px; }
+          .ring { position:relative; width:118px; height:118px; flex:none; }
+          .ring svg { width:118px; height:118px; transform: rotate(-90deg); }
+          .ring .c { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+          .ring .c b { font-size:30px; line-height:1; }
+          .ring .c span { font-size:11px; color: var(--secondary-text-color); margin-top:2px; }
+          .arc { transition: stroke-dashoffset .8s ease; }
+          .charging .arc { filter: drop-shadow(0 0 6px var(--charge-color)); }
+          .pulse { animation: pulse 2s ease-in-out infinite; }
+          @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.45 } }
+          .title { font-size:18px; font-weight:500; }
+          .status { margin-top:4px; font-size:13px; color: var(--secondary-text-color); }
+          .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; margin-top:8px; background: var(--secondary-background-color); }
+          .pill.on { background: var(--charge-color); color:#fff; }
+          .grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:8px; margin-top:16px; }
+          .cell { background: var(--secondary-background-color); border-radius:12px; padding:10px 6px; text-align:center; }
+          .cell b { display:block; font-size:16px; }
+          .cell span { font-size:11px; color: var(--secondary-text-color); }
+          .sec { margin-top:16px; font-size:11px; letter-spacing:.8px; text-transform:uppercase; color: var(--secondary-text-color); }
+          .curve { margin-top:6px; height:84px; }
+          .curve svg { width:100%; height:100%; display:block; }
+          .hist .r { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--divider-color); font-size:13px; }
+          .hist .r:first-child { border-top:0; }
+          .hist .d { color: var(--secondary-text-color); font-size:12px; }
+          .learn { margin-top:14px; font-size:12px; color: var(--secondary-text-color); line-height:1.5; }
+        </style>
+        <ha-card id="card" style="--charge-color:#ff9f0a">
+          <div class="head">
+            <div class="ring"><svg viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="43" fill="none" stroke="var(--divider-color)" stroke-width="8"/>
+                <circle class="arc" id="arc" cx="50" cy="50" r="43" fill="none" stroke="var(--charge-color)" stroke-width="8" stroke-linecap="round" stroke-dasharray="270.2" stroke-dashoffset="270.2"/>
+                <line id="tgt" x1="50" y1="2" x2="50" y2="12" stroke="var(--primary-text-color)" stroke-width="2" opacity=".6"/></svg>
+              <div class="c"><b id="pct">–</b><span id="pctl">battery</span></div></div>
+            <div><div class="title">Scooter charging</div><div class="status" id="status">–</div><span class="pill" id="pill">–</span></div>
+          </div>
+          <div class="grid">
+            <div class="cell"><b id="started">–</b><span>Started</span></div>
+            <div class="cell"><b id="from">–</b><span>From</span></div>
+            <div class="cell"><b id="left">–</b><span>Time left</span></div>
+            <div class="cell"><b id="power">–</b><span>Power</span></div>
+            <div class="cell"><b id="energy">–</b><span>Energy</span></div>
+            <div class="cell"><b id="target">–</b><span>Target</span></div>
+          </div>
+          <div id="curvebox"><div class="sec" id="curvelbl">Power</div><div class="curve" id="curve"></div></div>
+          <div class="sec">Recent charges</div><div class="hist" id="hist"></div>
+          <div class="learn" id="learn"></div>
+        </ha-card>`;
+      this._last = "";
+    }
+    const prefix = (this._config && this._config.prefix) || "openscooter";
+    const st = hass.states[`sensor.${prefix}_charge_status`];
+    const est = hass.states[`sensor.${prefix}_battery_estimate`];
+    const key = (st ? st.state : "") + "|" + (est ? est.state : "") + "|" + Math.floor(Date.now() / 30000);
+    if (key !== this._last) { this._last = key; this._load(); }
+  }
+
+  async _load() {
+    if (this._busy) return;
+    this._busy = true;
+    try { this._d = await this._hass.callWS({ type: "openscooter/charge" }); this._render(); }
+    catch (e) { this._root.getElementById("status").textContent = "Could not load charging data"; }
+    this._busy = false;
+  }
+
+  _spark(el, curve, color) {
+    if (!curve || curve.length < 3) { el.innerHTML = '<div style="color:var(--secondary-text-color);font-size:12px;padding-top:24px;text-align:center">The power curve appears as the charge goes on</div>'; return; }
+    const W = 300, H = 84, maxT = Math.max(1, ...curve.map((c) => c[0])), maxW = Math.max(10, ...curve.map((c) => c[2]));
+    const xy = curve.map((c) => [(c[0] / maxT) * W, H - 6 - (c[2] / maxW) * (H - 14)]);
+    const d = xy.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1)).join("");
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity=".35"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>` +
+      `<path d="${d}L${W} ${H - 6}L0 ${H - 6}Z" fill="url(#g)"/><path d="${d}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linejoin="round" vector-effect="non-scaling-stroke"/></svg>`;
+  }
+
+  _render() {
+    const $ = (i) => this._root.getElementById(i), d = this._d, c = d.current || {};
+    const hm = (m) => (m == null ? "–" : m >= 60 ? Math.floor(m / 60) + " h " + Math.round(m % 60) + " min" : Math.round(m) + " min");
+    const at = (s) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const charging = c.status === "charging", waiting = c.status === "waiting", done = c.status === "finished";
+    const last = (d.sessions || [])[d.sessions.length - 1];
+    $("card").classList.toggle("charging", charging);
+    const color = done ? "#30d158" : "#ff9f0a";
+    $("card").style.setProperty("--charge-color", color);
+
+    let value = null, label = "battery";
+    if (charging && c.estimate != null) { value = c.estimate; label = "estimated"; }
+    else if (done && last && last.end_percent != null) { value = last.end_percent; label = "charged"; }
+    else { const b = this._hass.states[`sensor.${(this._config && this._config.prefix) || "openscooter"}_battery`]; if (b && !isNaN(Number(b.state))) { value = Number(b.state); label = "last seen"; } }
+    $("pct").textContent = value == null ? "–" : (charging ? "~" : "") + Math.round(value) + "%";
+    $("pctl").textContent = label;
+    $("pctl").className = charging ? "pulse" : "";
+    $("arc").setAttribute("stroke-dashoffset", String(270.2 * (1 - Math.max(0, Math.min(100, value || 0)) / 100)));
+    const tgt = c.target || 100;
+    $("tgt").setAttribute("transform", `rotate(${(tgt / 100) * 360} 50 50)`);
+    $("tgt").style.display = c.enabled && tgt < 100 ? "" : "none";
+
+    $("status").textContent = charging ? "Charging since " + (c.started_at ? at(c.started_at) : "–")
+      : waiting ? "Plug on, waiting for the charger to draw power"
+      : done && last ? "Charged to " + Math.round(last.end_percent ?? 100) + "% · " + Number(last.energy_kwh).toFixed(2) + " kWh"
+      : c.enabled ? "Smart charging ready" : "Smart charging is off";
+    const pill = $("pill");
+    pill.textContent = charging ? "Charging" : waiting ? "Plug on" : done ? "Charged" : "Idle";
+    pill.className = "pill" + (charging ? " on pulse" : done ? " on" : "");
+
+    $("started").textContent = charging && c.started_at ? at(c.started_at) : "–";
+    $("from").textContent = charging && c.start_percent != null ? Math.round(c.start_percent) + "%" : "–";
+    $("left").textContent = charging ? hm(c.remaining_min) : "–";
+    $("power").textContent = charging && c.power_w != null ? Math.round(c.power_w) + " W" : "–";
+    $("energy").textContent = charging && c.energy_kwh != null ? Number(c.energy_kwh).toFixed(2) + " kWh" : "–";
+    $("target").textContent = c.enabled ? tgt + "%" : "–";
+
+    const live = charging ? d.live_curve : d.last_curve;
+    $("curvelbl").textContent = charging ? "Power of this charge" : "Power of the last charge";
+    this._spark($("curve"), live, color);
+
+    const n = (this._config && this._config.history) || 5;
+    const rows = (d.sessions || []).slice(-n).reverse();
+    $("hist").innerHTML = rows.length ? rows.map((r) =>
+      `<div class="r"><div>${new Date(r.start).toLocaleDateString([], { day: "numeric", month: "short" })} · ${at(r.start)}<div class="d">${r.start_percent != null ? Math.round(r.start_percent) + "%" : "?"} → ${r.end_percent != null ? Math.round(r.end_percent) + "%" : "?"}</div></div>` +
+      `<div style="text-align:right">${Number(r.energy_kwh).toFixed(2)} kWh<div class="d">${hm(r.duration_min)}</div></div></div>`).join("")
+      : '<div class="d" style="color:var(--secondary-text-color);font-size:13px">No finished charge yet.</div>';
+
+    const m = d.model || {};
+    $("learn").textContent = m.kwh_per_percent
+      ? `Learned from ${m.sessions} charge${m.sessions === 1 ? "" : "s"}: 1% ≈ ${(m.kwh_per_percent * 1000).toFixed(0)} Wh` + (m.full_kwh ? ` · full battery ≈ ${m.full_kwh.toFixed(2)} kWh` : "") + ` · ${m.total_sessions} charges, ${m.total_kwh} kWh in total`
+      : "The estimate appears after the first complete charge.";
+  }
+}
+customElements.define("openscooter-charge-card", OpenScooterChargeCard);
+window.customCards.push({ type: "openscooter-charge-card", name: "OpenScooter charging", description: "Live charge, power curve and charge history", preview: false });

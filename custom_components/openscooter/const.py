@@ -1,7 +1,7 @@
 """Constants for the OpenScooter integration."""
 
 DOMAIN = "openscooter"
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 CONF_WEBHOOK_ID = "webhook_id"
 CONF_SECRET = "secret"

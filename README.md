@@ -52,3 +52,11 @@ type: custom:openscooter-route-card
 ```
 
 The map uses OpenStreetMap tiles (internet needed to load the background).
+
+## Charging card
+
+```yaml
+type: custom:openscooter-charge-card
+```
+
+A live ring with the estimated level and your target, start time, start level, power, energy and time left, the power curve of the running (or last) charge, the recent charges and what has been learned. Options: `history: 5` (rows), `prefix` (if you renamed the device). All charging data is collected by Home Assistant from the smart plug, so it works with or without the phone app; the app only adds the battery level at the start of a charge.
