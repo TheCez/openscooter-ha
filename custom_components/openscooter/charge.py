@@ -43,6 +43,7 @@ RUN_BREAK_W = 2.0                  # under this the plug delivers nothing: the e
 MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
+IDLE_PLUG_OFF = timedelta(minutes=20)   # plug on, charger idling (scooter full or not connected) for this long: switch it off
 MAX_INTEGRATE_H = 0.1              # never integrate power over a gap longer than 6 min (e.g. a restart)
 TAIL_PCT = 10.0                    # the last 10 % are the slow constant-voltage part
 MIN_LEARN_KWH = 0.03
@@ -73,6 +74,7 @@ class ChargeManager:
         self.last_estimate: float | None = None          # kept after a session until the scooter reports a battery
         self._waiting_since: datetime | None = None
         self._power_ticks = 0
+        self._idle_ticks = 0
         self._plug_off_ticks = 0
         self._target_ticks = 0
         self._unsub = None
@@ -88,7 +90,8 @@ class ChargeManager:
         if saved_status in ("charging", "waiting") and (d.get("session") or saved_status == "waiting"):
             self.status = saved_status
             self.session = d.get("session")
-            self._waiting_since = dt_util.utcnow()
+            ws = dt_util.parse_datetime(d["waiting_since"]) if d.get("waiting_since") else None
+            self._waiting_since = ws or dt_util.utcnow()   # a restart must not give the wait a fresh start
         elif saved_status == "finished":
             self.status = "finished"
         self._refit()
@@ -98,6 +101,7 @@ class ChargeManager:
             "auto_enabled": self.auto_enabled, "history": self.history, "total_kwh": round(self.total_kwh, 3),
             "total_sessions": self.total_sessions, "status": self.status, "session": self.session,
             "last_estimate": self.last_estimate,
+            "waiting_since": self._waiting_since.isoformat() if self._waiting_since and self.status == "waiting" else None,
         }
 
     # ---- options -------------------------------------------------------------------------------
@@ -521,6 +525,46 @@ class ChargeManager:
             curve.append([float(m), round(energy, 4), round(last_w, 1)])
         return curve
 
+    async def _idle_since(self, now: datetime) -> datetime:
+        """Since when has the plug been on with the charger drawing less than MIN_ON_W? From the recorded history of the
+        power sensor and the plug switch; "now" when there is no history (so nothing is ever switched off by mistake)."""
+        power_id = self._o.get(CONF_POWER)
+        try:
+            if not power_id or not self.plug or "recorder" not in self.hass.config.components:
+                return now
+            from homeassistant.components.recorder import get_instance, history
+
+            begin = now - timedelta(hours=8)
+            ids = [power_id, self.plug]
+            states = await get_instance(self.hass).async_add_executor_job(
+                lambda: history.get_significant_states(self.hass, begin, now, ids, None, True, False, False, True))
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not read the plug history for the idle check: %s", err)
+            return now
+        pts = []
+        for st in states.get(power_id, []):
+            try:
+                pts.append((st.last_updated, float(st.state)))
+            except (TypeError, ValueError):
+                pts.append((st.last_updated, None))
+        pts.sort(key=lambda x: x[0])
+        low = None
+        for ts, w in reversed(pts):
+            if w is None:
+                continue
+            if w >= MIN_ON_W:
+                break
+            low = ts
+        sw = sorted(((st.last_updated, st.state) for st in states.get(self.plug, [])), key=lambda x: x[0])
+        last_off = max((ts for ts, s_ in sw if s_ == "off"), default=None)
+        on_since = begin
+        if last_off is not None:
+            after = [ts for ts, s_ in sw if s_ == "on" and ts > last_off]
+            on_since = after[0] if after else now
+        if low is None:
+            return now
+        return min(max(low, on_since), now)
+
     async def _low_since(self, off_w: float, now: datetime) -> datetime:
         """When did the power really fall under [off_w] and stay there? Read from the plug's recorded history, so a
         restart, a reload or a saved setting never restarts the clock. Falls back to "now" without history."""
@@ -645,6 +689,24 @@ class ChargeManager:
                     return
             else:
                 self._power_ticks = 0
+
+        # A plug left on while the charger only idles (scooter full or not connected) is switched off after a while,
+        # counted from the plug's history so that a restart never resets the clock.
+        if self.status in ("idle", "finished") and self.enabled and self.plug and power is not None and power < MIN_ON_W:
+            ps = self.hass.states.get(self.plug)
+            if ps is not None and ps.state == "on":
+                self._idle_ticks += 1
+                if self._idle_ticks % 4 == 1:   # look into the history about once a minute
+                    since = await self._idle_since(now)
+                    if now - since >= IDLE_PLUG_OFF:
+                        _LOGGER.info("Plug has been on since %s with the charger idling (%.1f W): switching it off", since.isoformat(timespec="seconds"), power)
+                        await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)
+                        self.hass.bus.async_fire("openscooter_plug_idle_off", {"since": since.isoformat(), "power_w": power})
+                        self._idle_ticks = 0
+            else:
+                self._idle_ticks = 0
+        else:
+            self._idle_ticks = 0
 
         if self.status == "waiting":
             if power is not None and power >= MIN_ON_W:
