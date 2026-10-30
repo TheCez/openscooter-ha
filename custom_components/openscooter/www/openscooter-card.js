@@ -90,10 +90,23 @@ class OpenScooterCard extends HTMLElement {
     let text = "";
     if (charge) {
       const a = charge.attributes || {};
-      if (charge.state === "charging") text = "Charging" + (est ? " · about " + Math.round(Number(est.state)) + "%" : "") + " · up to " + a.target_percent + "%";
-      else if (charge.state === "waiting") text = "Plug on, waiting for the charger to draw power";
-      else if (charge.state === "finished" && a.last_session) text = "Last charge: " + Number(a.last_session.energy_kwh).toFixed(2) + " kWh";
-      else if (a.smart_charging) text = "Smart charging ready";
+      const hm = (m) => (m >= 60 ? Math.floor(m / 60) + " h " + Math.round(m % 60) + " min" : Math.round(m) + " min");
+      const at = (s) => new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      if (charge.state === "charging") {
+        const st = this._s("sensor", "charge_started");
+        const sp = this._s("sensor", "charge_start_percent");
+        const rem = this._s("sensor", "charge_time_remaining");
+        const pw = this._s("sensor", "charge_power");
+        text = "Charging" + (st ? " since " + at(st.state) : "") + (sp ? " from " + Math.round(Number(sp.state)) + "%" : "") +
+          (est ? " · about " + Math.round(Number(est.state)) + "%" : "") +
+          (pw ? " · " + Math.round(Number(pw.state)) + " W" : "") +
+          (rem ? " · " + hm(Number(rem.state)) + " left" : "") + " · up to " + a.target_percent + "%";
+      } else if (charge.state === "waiting") text = "Plug on, waiting for the charger to draw power";
+      else if (charge.state === "finished" && a.last_session) {
+        const l = a.last_session;
+        text = "Charged" + (l.end_percent != null ? " to " + Math.round(l.end_percent) + "%" : "") + " · " +
+          Number(l.energy_kwh).toFixed(2) + " kWh in " + hm(l.duration_min);
+      } else if (a.smart_charging) text = "Smart charging ready";
     }
     this._q("charge").textContent = text;
   }

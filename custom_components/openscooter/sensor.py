@@ -6,8 +6,10 @@ from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorEntityDescription, SensorStateClass
-from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfLength, UnitOfSpeed, UnitOfTemperature, UnitOfElectricPotential
+from homeassistant.const import PERCENTAGE, UnitOfEnergy, UnitOfPower, UnitOfTime, UnitOfLength, UnitOfSpeed, UnitOfTemperature, UnitOfElectricPotential
 from homeassistant.helpers.entity import EntityCategory
+
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .entity import ScooterEntity
@@ -50,6 +52,22 @@ SENSORS: tuple[Desc, ...] = (
          suggested_display_precision=2, value=lambda h: (h.charge.last_session or {}).get("energy_kwh")),
     Desc(key="session_kwh", name="Current charge energy", device_class=SensorDeviceClass.ENERGY, native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
          suggested_display_precision=3, value=lambda h: round(h.charge.session["energy"], 3) if h.charge.session else None),
+    Desc(key="charge_started", name="Charging started", device_class=SensorDeviceClass.TIMESTAMP,
+         value=lambda h: dt_util.parse_datetime(h.charge.session["start"]) if h.charge.session else None),
+    Desc(key="charge_start_percent", name="Charge start level", device_class=SensorDeviceClass.BATTERY,
+         native_unit_of_measurement=PERCENTAGE,
+         value=lambda h: h.charge.session.get("start_percent") if h.charge.session else None),
+    Desc(key="charge_power", name="Charge power", device_class=SensorDeviceClass.POWER, native_unit_of_measurement=UnitOfPower.WATT,
+         suggested_display_precision=0, value=lambda h: h.charge.power_w),
+    Desc(key="charge_remaining", name="Charge time remaining", device_class=SensorDeviceClass.DURATION,
+         native_unit_of_measurement=UnitOfTime.MINUTES, value=lambda h: h.charge.remaining_min),
+    Desc(key="charge_duration", name="Charge duration", device_class=SensorDeviceClass.DURATION,
+         native_unit_of_measurement=UnitOfTime.MINUTES, value=lambda h: h.charge.duration_min),
+    Desc(key="charge_sessions", name="Charge sessions", state_class=SensorStateClass.TOTAL_INCREASING,
+         entity_category=EntityCategory.DIAGNOSTIC, value=lambda h: h.charge.total_sessions),
+    Desc(key="charge_total_kwh", name="Total charge energy", device_class=SensorDeviceClass.ENERGY,
+         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR, state_class=SensorStateClass.TOTAL_INCREASING,
+         suggested_display_precision=2, value=lambda h: round(h.charge.total_kwh, 3)),
 )
 
 
@@ -73,5 +91,6 @@ class ScooterSensor(ScooterEntity, SensorEntity):
     def extra_state_attributes(self):
         if self.entity_description.key == "charge_status":
             c = self.hub.charge
-            return {"target_percent": c.target, "smart_charging": c.enabled, "last_session": c.last_session}
+            return {"target_percent": c.target, "smart_charging": c.enabled, "last_session": c.last_session,
+                    "recent_sessions": [{k: v for k, v in r.items() if k != "curve"} for r in c.history[-10:]]}
         return None

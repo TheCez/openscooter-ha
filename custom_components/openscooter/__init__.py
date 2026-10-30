@@ -38,10 +38,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         c = hub.charge
         return web.json_response({
             "ok": True, "version": VERSION,
-            "charge": {
-                "status": c.status, "target": c.target, "enabled": c.enabled,
-                "estimate": c.estimate, "kwh_per_percent": c.kwh_per_percent,
-            },
+             "charge": c.snapshot(),
         })
 
     webhook.async_register(hass, DOMAIN, "OpenScooter", entry.data[CONF_WEBHOOK_ID], handle_webhook,
@@ -54,6 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.http.async_register_static_paths([StaticPathConfig(STATIC_URL, www, False)])
         add_extra_js_url(hass, f"{STATIC_URL}/openscooter-card.js?v={VERSION}")
         websocket_api.async_register_command(hass, ws_pairing)
+        websocket_api.async_register_command(hass, ws_sessions)
     await panel_custom.async_register_panel(
         hass, frontend_url_path="openscooter", webcomponent_name="openscooter-panel",
         sidebar_title="OpenScooter", sidebar_icon="mdi:scooter",
@@ -101,5 +99,19 @@ def ws_pairing(hass: HomeAssistant, connection: websocket_api.ActiveConnection, 
                 "connected": hub.connected,
                 "battery": hub.data.get("battery"),
             })
+            return
+    connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")
+
+
+@websocket_api.websocket_command({vol.Required("type"): "openscooter/sessions", vol.Optional("curves", default=False): bool})
+@websocket_api.require_admin
+@callback
+def ws_sessions(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Full charging history (and optionally the power curves) for the panel and for backups."""
+    for hub in hass.data.get(DOMAIN, {}).values():
+        if isinstance(hub, ScooterHub):
+            rows = hub.charge.history if msg["curves"] else [
+                {k: v for k, v in r.items() if k != "curve"} for r in hub.charge.history]
+            connection.send_result(msg["id"], {"sessions": rows, "current": hub.charge.snapshot()})
             return
     connection.send_error(msg["id"], "not_found", "OpenScooter is not set up")

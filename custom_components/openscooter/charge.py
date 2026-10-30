@@ -1,11 +1,18 @@
 """Smart charging.
 
 The scooter cannot be switched on while it charges, so charging is followed through the smart plug:
- - arrival at home with a low battery -> plug on
- - plug power >= MIN_ON_W -> a session starts, its energy (kWh) is integrated
- - power stays below `off_power_w` for `off_delay_min` -> charger finished (taper) -> plug off, and the
-   session teaches the "kWh per battery %" of this charger/battery
- - once that is learned, charging also stops when the energy for the chosen target % has been delivered.
+ - arrival at home with a low battery -> plug on (a charge started by hand is picked up too)
+ - plug power >= MIN_ON_W -> a session starts; its energy (kWh) is read from the plug (or integrated from power)
+ - power stays below `off_power_w` for `off_delay_min` -> the charger has finished (CV taper) -> plug off
+ - every finished charge is stored (with a coarse power curve) and refits the charge model.
+
+Charge model (explainable, works with a handful of sessions): energy to fill a battery from s % is
+        E_full(s) = a + b * (100 - s)                                   [kWh]
+where b is the energy of one % in the constant-current part and a the extra energy of the constant-voltage
+tail and charger losses. Fitted by least squares over the stored sessions (with a single session: a = 0).
+The last TAIL_PCT percent are spread over the energy `a + b*TAIL_PCT` (they cost more energy per %).
+From the energy delivered so far this gives the live battery level, the time left, and the stop point for a
+"charge up to X %" target. All numbers come from this scooter's own charges and sharpen with every one.
 """
 from __future__ import annotations
 
@@ -14,7 +21,6 @@ import statistics
 from datetime import datetime, timedelta
 from typing import Any, TYPE_CHECKING
 
-from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 from homeassistant.util.location import distance
@@ -31,42 +37,62 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 TICK = timedelta(seconds=15)
-MIN_ON_W = 15.0                 # plug power that counts as "charger is delivering"
+MIN_ON_W = 15.0                    # plug power that counts as "the charger is delivering"
 WAIT_FOR_POWER = timedelta(minutes=15)
 MAX_SESSION = timedelta(hours=14)
+MAX_INTEGRATE_H = 0.1              # never integrate power over a gap longer than 6 min (e.g. a restart)
+TAIL_PCT = 10.0                    # the last 10 % are the slow constant-voltage part
 MIN_LEARN_KWH = 0.03
-MIN_LEARN_GAP = 15              # start battery must be <= 85 % to learn from a full charge
+MIN_LEARN_GAP = 15                 # a charge teaches the model only if it started at <= 85 %
+MIN_LEARN_MIN = 10
+HISTORY_MAX = 200
+CURVE_STEP_S = 120
+CURVE_MAX = 400
+STOP_MODEL_SESSIONS = 3            # "charge up to X %" is only enforced once the model has this many sessions
+DEFAULT_TAIL_MIN = 40.0
 
 
 class ChargeManager:
     def __init__(self, hub: "ScooterHub") -> None:
         self.hub = hub
         self.hass = hub.hass
-        self.auto_enabled = True            # the "Smart charging" switch
+        self.auto_enabled = True
         self.status = "idle"                # idle | waiting | charging | finished
         self.session: dict[str, Any] | None = None
-        self.last_session: dict[str, Any] | None = None
-        self.samples: list[float] = []
-        self.kwh_per_percent: float | None = None
-        self.estimate: float | None = None  # battery % estimated through charging
+        self.history: list[dict[str, Any]] = []
+        self.total_kwh = 0.0
+        self.total_sessions = 0
+        self.model: dict[str, float] | None = None      # {"a","b","n"}
+        self.tail_min: float | None = None
         self.away_seen = True
+        self.last_estimate: float | None = None          # kept after a session until the scooter reports a battery
         self._waiting_since: datetime | None = None
         self._power_ticks = 0
+        self._plug_off_ticks = 0
+        self._target_ticks = 0
         self._unsub = None
 
     # ---- persistence ---------------------------------------------------------------------------
     def load(self, d: dict[str, Any]) -> None:
         self.auto_enabled = d.get("auto_enabled", True)
-        self.samples = [float(x) for x in d.get("samples", [])]
-        self.kwh_per_percent = d.get("kwh_per_percent")
-        self.last_session = d.get("last_session")
-        self.estimate = d.get("estimate")
+        self.history = list(d.get("history", []))[-HISTORY_MAX:]
+        self.total_kwh = float(d.get("total_kwh", sum(h.get("energy_kwh", 0) for h in self.history)))
+        self.total_sessions = int(d.get("total_sessions", len(self.history)))
+        self.last_estimate = d.get("last_estimate")
+        saved_status = d.get("status", "idle")
+        if saved_status in ("charging", "waiting") and (d.get("session") or saved_status == "waiting"):
+            self.status = saved_status
+            self.session = d.get("session")
+            self._waiting_since = dt_util.utcnow()
+        elif saved_status == "finished":
+            self.status = "finished"
+        self._refit()
 
     def dump(self) -> dict[str, Any]:
         return {
-            "auto_enabled": self.auto_enabled, "samples": self.samples,
-            "kwh_per_percent": self.kwh_per_percent, "last_session": self.last_session,
-            "estimate": self.estimate,
+            "auto_enabled": self.auto_enabled, "history": self.history, "total_kwh": round(self.total_kwh, 3),
+            "total_sessions": self.total_sessions, "status": self.status, "session": self.session,
+            "last_estimate": self.last_estimate,
         }
 
     # ---- options -------------------------------------------------------------------------------
@@ -94,6 +120,123 @@ class ChargeManager:
             self._unsub()
             self._unsub = None
 
+    # ---- charge model --------------------------------------------------------------------------
+    def _refit(self) -> None:
+        pts = [(100.0 - float(h["start_percent"]), float(h["energy_kwh"]))
+               for h in self.history[-20:] if h.get("learn") and h.get("start_percent") is not None]
+        tails = [float(h["tail_min"]) for h in self.history[-20:] if h.get("tail_min")]
+        self.tail_min = round(statistics.median(tails), 1) if tails else None
+        self.model = None
+        if not pts:
+            return
+        gaps = [g for g, _ in pts]
+        es = [e for _, e in pts]
+        a = 0.0
+        b = statistics.median(e / g for g, e in pts)
+        if len(pts) >= 3 and max(gaps) - min(gaps) >= 10:
+            mg, me = statistics.fmean(gaps), statistics.fmean(es)
+            sxx = sum((g - mg) ** 2 for g in gaps)
+            if sxx > 0:
+                b2 = sum((g - mg) * (e - me) for g, e in pts) / sxx
+                a2 = me - b2 * mg
+                if b2 > 0 and 0 <= a2 <= 0.6 * me:      # physically sensible: positive slope, modest offset
+                    a, b = a2, b2
+        self.model = {"a": a, "b": b, "n": float(len(pts))}
+
+    @property
+    def kwh_per_percent(self) -> float | None:
+        return round(self.model["b"], 5) if self.model else None
+
+    @property
+    def model_sessions(self) -> int:
+        return int(self.model["n"]) if self.model else 0
+
+    def _tail_e(self) -> float:
+        m = self.model or {"a": 0.0, "b": 0.0}
+        return m["a"] + m["b"] * TAIL_PCT
+
+    def _e_to_full(self, soc: float) -> float:
+        """Energy (kWh) needed from [soc] % to a full battery."""
+        m = self.model
+        if not m:
+            return 0.0
+        tail = self._tail_e()
+        if soc >= 100 - TAIL_PCT:
+            return tail * (100.0 - soc) / TAIL_PCT
+        return tail + m["b"] * (100.0 - TAIL_PCT - soc)
+
+    def _soc_after(self, start: float, energy: float) -> float:
+        m = self.model
+        r = max(0.0, self._e_to_full(start) - energy)
+        tail = self._tail_e()
+        if r >= tail:
+            return 100.0 - TAIL_PCT - (r - tail) / m["b"]
+        return 100.0 - TAIL_PCT * r / tail if tail > 0 else 100.0
+
+    def _minutes_from(self, soc: float, peak_kw: float) -> float:
+        """Minutes to charge from [soc] % to full: constant-current part at the session's power, then the tail."""
+        e = self._e_to_full(soc)
+        tail = self._tail_e()
+        cc = max(0.0, e - tail) / max(peak_kw * 0.92, 0.03) * 60.0
+        tail_part = (self.tail_min or DEFAULT_TAIL_MIN) * (min(e, tail) / tail if tail > 0 else 0.0)
+        return cc + tail_part
+
+    # ---- live values ---------------------------------------------------------------------------
+    @property
+    def estimate(self) -> float | None:
+        """Battery % now: modelled during a charge, the final value afterwards (until the scooter reports again)."""
+        s = self.session
+        if self.status == "charging" and s and self.model and s.get("start_percent") is not None:
+            return round(min(100.0, max(float(s["start_percent"]), self._soc_after(float(s["start_percent"]), s["energy"]))), 1)
+        return self.last_estimate
+
+    @property
+    def remaining_min(self) -> float | None:
+        s = self.session
+        if self.status != "charging" or not s or not self.model or s.get("start_percent") is None:
+            return None
+        soc = self.estimate
+        if soc is None:
+            return None
+        peak = max(float(s.get("peak_w", 0.0)), MIN_ON_W) / 1000.0
+        goal = float(self.target) if self.model_sessions >= STOP_MODEL_SESSIONS and self.target < 100 else 100.0
+        if soc >= goal:
+            return 0.0
+        return round(max(0.0, self._minutes_from(soc, peak) - (self._minutes_from(goal, peak) if goal < 100 else 0.0)), 0)
+
+    @property
+    def power_w(self) -> float | None:
+        return self._float_state(self._o.get(CONF_POWER)) if self.status in ("charging", "waiting") else None
+
+    @property
+    def duration_min(self) -> float | None:
+        if self.status == "charging" and self.session:
+            start = dt_util.parse_datetime(self.session["start"])
+            if start:
+                return round((dt_util.utcnow() - start).total_seconds() / 60.0, 0)
+        return None
+
+    @property
+    def last_session(self) -> dict[str, Any] | None:
+        if not self.history:
+            return None
+        return {k: v for k, v in self.history[-1].items() if k != "curve"}
+
+    def snapshot(self) -> dict[str, Any]:
+        s = self.session
+        return {
+            "status": self.status, "target": self.target, "enabled": self.enabled,
+            "estimate": self.estimate,
+            "start_percent": s.get("start_percent") if s else None,
+            "started_at": s["start"] if s else None,
+            "energy_kwh": round(s["energy"], 3) if s else None,
+            "power_w": self.power_w,
+            "remaining_min": self.remaining_min,
+            "kwh_per_percent": self.kwh_per_percent,
+            "model_sessions": self.model_sessions,
+            "last": self.last_session,
+        }
+
     # ---- inputs --------------------------------------------------------------------------------
     def _at_home(self) -> bool | None:
         lat, lon = self.hub.data.get("lat"), self.hub.data.get("lon")
@@ -118,11 +261,9 @@ class ChargeManager:
         except ValueError:
             return None
 
-    @callback
     def on_fresh_battery(self) -> None:
-        self.estimate = None  # the scooter itself reported a battery level again
+        self.last_estimate = None  # the scooter itself reported a battery level again
 
-    @callback
     def on_scooter_update(self) -> None:
         home = self._at_home()
         if home is False:
@@ -142,60 +283,97 @@ class ChargeManager:
         self._waiting_since = dt_util.utcnow()
         self.session = None
         self.away_seen = False
+        self._plug_off_ticks = self._target_ticks = 0
         self.hub.notify()
+        self.hub.save_soon()
         _LOGGER.info("Smart charging: plug on (%s)", reason)
 
+    def _start_session(self, now: datetime, power: float) -> None:
+        e = self._float_state(self._o.get(CONF_ENERGY))
+        battery = self.hub.data.get("battery")
+        self.session = {
+            "start": now.isoformat(), "start_percent": battery,
+            "start_source": "scooter" if battery is not None else None,
+            "energy": 0.0, "last_ts": now.isoformat(), "last_power": power, "peak_w": power,
+            "e_start": e, "low_since": None, "curve": [[0.0, 0.0, round(power, 1)]], "curve_ts": now.isoformat(),
+        }
+        self.status = "charging"
+        self._power_ticks = self._plug_off_ticks = self._target_ticks = 0
+        self.last_estimate = None
+        self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": battery})
+        self.hub.notify()
+        self.hub.save_soon()
+
     async def async_end(self, reason: str) -> None:
-        """Stop now: plug off, record the session, learn from it."""
-        if self.plug:
+        """Stop now: plug off, store the session, refit the model."""
+        if self.plug and reason != "plug_off":
             await self.hass.services.async_call("switch", "turn_off", {"entity_id": self.plug}, blocking=False)
         s = self.session
         if s is None:
             self.status = "idle"
             self.hub.notify()
             return
+        now = dt_util.utcnow()
+        started = dt_util.parse_datetime(s["start"]) or now
         energy = round(s["energy"], 3)
+        minutes = max(0.0, (now - started).total_seconds() / 60.0)
         start_pct = s.get("start_percent")
+        source = s.get("start_source")
+        curve = s.get("curve", [])
+        peak = float(s.get("peak_w", 0.0))
+
+        # Tail length: time since the power last was near its peak.
+        tail_min = None
+        if reason == "taper" and curve and peak > 0:
+            near = [c[0] for c in curve if c[2] >= 0.85 * peak]
+            if near:
+                tail_min = round(max(0.0, minutes - max(near)), 1)
+
         end_pct: float | None = None
         if reason == "taper":
             end_pct = 100.0
         elif reason == "target":
             end_pct = float(self.target)
-        if reason == "taper" and start_pct is not None:
+        elif start_pct is not None and self.model:
+            end_pct = round(min(100.0, self._soc_after(float(start_pct), energy)), 1)
+
+        learn = False
+        if reason == "taper" and start_pct is not None and source == "scooter":
             gap = 100.0 - float(start_pct)
-            if gap >= MIN_LEARN_GAP and energy >= MIN_LEARN_KWH:
-                self.samples = (self.samples + [energy / gap])[-15:]
-                self.kwh_per_percent = round(statistics.median(self.samples), 5)
-        self.last_session = {
-            "start": s["start"], "end": dt_util.utcnow().isoformat(), "start_percent": start_pct,
-            "end_percent": end_pct, "energy_kwh": energy, "reason": reason,
+            learn = gap >= MIN_LEARN_GAP and energy >= MIN_LEARN_KWH and minutes >= MIN_LEARN_MIN
+            if learn and self.model:                       # reject interrupted / odd sessions
+                pred = self.model["a"] + self.model["b"] * gap
+                if pred > 0 and abs(energy - pred) > 0.6 * pred:
+                    learn = False
+        elif reason == "taper" and start_pct is None and self.model and energy >= MIN_LEARN_KWH:
+            gap = (energy - self.model["a"]) / self.model["b"]          # infer where it started
+            start_pct = round(max(0.0, min(100.0, 100.0 - gap)), 1)
+            source = "inferred"
+
+        rec = {
+            "id": s["start"], "start": s["start"], "end": now.isoformat(), "start_percent": start_pct,
+            "start_source": source, "end_percent": end_pct, "energy_kwh": energy, "duration_min": round(minutes, 1),
+            "peak_w": round(peak, 1), "avg_w": round(energy * 1000.0 / (minutes / 60.0), 1) if minutes > 1 else None,
+            "reason": reason, "learn": learn, "tail_min": tail_min, "curve": curve[-CURVE_MAX:],
         }
-        self.estimate = end_pct
+        self.history = (self.history + [rec])[-HISTORY_MAX:]
+        self.total_kwh += energy
+        self.total_sessions += 1
+        self._refit()
+        self.last_estimate = end_pct
         self.session = None
         self.status = "finished"
-        self.hass.bus.async_fire(EVENT_CHARGE_FINISHED, self.last_session)
+        self.hass.bus.async_fire(EVENT_CHARGE_FINISHED, {k: v for k, v in rec.items() if k != "curve"})
         self.hub.notify()
-        self.hub.save_soon()
-        _LOGGER.info("Smart charging finished (%s): %.3f kWh", reason, energy)
-
-    def _start_session(self, now: datetime, power: float) -> None:
-        e = self._float_state(self._o.get(CONF_ENERGY))
-        self.session = {
-            "start": now.isoformat(), "start_percent": self.hub.data.get("battery"), "energy": 0.0,
-            "last_ts": now.isoformat(), "last_power": power, "e_start": e, "low_since": None,
-        }
-        self.status = "charging"
-        self._power_ticks = 0
-        self.hass.bus.async_fire(EVENT_CHARGE_STARTED, {"start_percent": self.session["start_percent"]})
-        self.hub.notify()
+        await self.hub.store.async_save(self.hub._dump())
+        _LOGGER.info("Smart charging finished (%s): %.3f kWh in %.0f min", reason, energy, minutes)
 
     # ---- the 15 s evaluation -------------------------------------------------------------------
     async def _tick(self, _now=None) -> None:
         power = self._float_state(self._o.get(CONF_POWER))
         now = dt_util.utcnow()
 
-        # A charge started by hand (plug switched on outside the integration) is picked up too, so it is
-        # also switched off at the end and also taught to the model.
+        # A charge started by hand (plug switched on outside the integration) is picked up too.
         if self.status in ("idle", "finished") and self.enabled:
             if power is not None and power >= MIN_ON_W:
                 self._power_ticks += 1
@@ -218,42 +396,65 @@ class ChargeManager:
         if self.status != "charging" or self.session is None:
             return
         s = self.session
+        started = dt_util.parse_datetime(s["start"]) or now
+
+        # The plug was switched off by someone else: end without teaching the model.
+        plug_state = self.hass.states.get(self.plug) if self.plug else None
+        if plug_state is not None and plug_state.state == "off":
+            self._plug_off_ticks += 1
+            if self._plug_off_ticks >= 3:
+                await self.async_end("plug_off")
+                return
+        else:
+            self._plug_off_ticks = 0
+
+        # Energy: the plug's own counter when there is one, otherwise integrate its power.
         last_ts = dt_util.parse_datetime(s["last_ts"]) or now
-        hours = max(0.0, (now - last_ts).total_seconds() / 3600.0)
-        if power is not None:
-            s["energy"] += (s.get("last_power", power) + power) / 2.0 * hours / 1000.0   # trapezoid, kWh
-            s["last_power"] = power
+        hours = min(MAX_INTEGRATE_H, max(0.0, (now - last_ts).total_seconds() / 3600.0))
         e_now = self._float_state(self._o.get(CONF_ENERGY))
         if e_now is not None and s.get("e_start") is not None and e_now >= s["e_start"]:
-            s["energy"] = max(s["energy"], e_now - s["e_start"]) if power is None else (e_now - s["e_start"])
+            s["energy"] = e_now - s["e_start"]
+        elif power is not None:
+            s["energy"] += (s.get("last_power", power) + power) / 2.0 * hours / 1000.0
+        if power is not None:
+            s["last_power"] = power
+            s["peak_w"] = max(float(s.get("peak_w", 0.0)), power)
         s["last_ts"] = now.isoformat()
 
-        k = self.kwh_per_percent
-        sp = s.get("start_percent")
-        if k and sp is not None:
-            self.estimate = round(min(100.0, float(sp) + s["energy"] / k), 1)
-        elif sp is not None:
-            self.estimate = None
+        # Coarse power curve (kept with the session for later analysis).
+        c_ts = dt_util.parse_datetime(s.get("curve_ts", s["start"])) or started
+        if (now - c_ts).total_seconds() >= CURVE_STEP_S and power is not None and len(s["curve"]) < CURVE_MAX:
+            s["curve"].append([round((now - started).total_seconds() / 60.0, 1), round(s["energy"], 4), round(power, 1)])
+            s["curve_ts"] = now.isoformat()
 
         off_w = float(self._o.get(CONF_OFF_W, DEFAULT_OFF_W))
         off_min = float(self._o.get(CONF_OFF_MIN, DEFAULT_OFF_MIN))
-        started = dt_util.parse_datetime(s["start"]) or now
 
-        if power is not None and power < off_w and now - started > timedelta(minutes=5):
-            if s["low_since"] is None:
-                s["low_since"] = now.isoformat()
-            low = dt_util.parse_datetime(s["low_since"]) or now
-            if now - low >= timedelta(minutes=off_min):
-                await self.async_end("taper")
-                return
-        else:
-            s["low_since"] = None
+        # Finished: power under the threshold for long enough (an unavailable sensor never counts as "low").
+        if power is not None:
+            if power < off_w and now - started > timedelta(minutes=5):
+                if s["low_since"] is None:
+                    s["low_since"] = now.isoformat()
+                low = dt_util.parse_datetime(s["low_since"]) or now
+                if now - low >= timedelta(minutes=off_min):
+                    await self.async_end("taper")
+                    return
+            else:
+                s["low_since"] = None
 
-        if k and sp is not None and len(self.samples) >= 2 and self.target < 100:
-            if s["energy"] >= max(0.0, (self.target - float(sp))) * k:
-                await self.async_end("target")
-                return
+        # "Charge up to X %": only with a trained model, and only after two checks in a row.
+        est = self.estimate
+        if est is not None and self.model_sessions >= STOP_MODEL_SESSIONS and self.target < 100:
+            if est >= self.target:
+                self._target_ticks += 1
+                if self._target_ticks >= 2:
+                    await self.async_end("target")
+                    return
+            else:
+                self._target_ticks = 0
+
         if now - started > MAX_SESSION:
             await self.async_end("timeout")
             return
         self.hub.notify()
+        self.hub.save_soon()
