@@ -1,0 +1,21 @@
+{
+  "domain": "openscooter",
+  "name": "OpenScooter",
+  "codeowners": [
+    "@TheCez"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "webhook",
+    "frontend",
+    "panel_custom",
+    "zone"
+  ],
+  "documentation": "https://github.com/TheCez/openscooter-ha",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/TheCez/openscooter-ha/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

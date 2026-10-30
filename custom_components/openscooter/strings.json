@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "OpenScooter",
+        "description": "This adds your scooter to Home Assistant. Afterwards open **OpenScooter** in the sidebar and scan the QR code with the OpenScooter app."
+      }
+    },
+    "abort": { "already_configured": "OpenScooter is already set up." }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Smart charging",
+        "description": "Pick the smart plug your charger is connected to. It is switched on when the scooter arrives home with a low battery and switched off when charging is done. Leave the plug empty to turn smart charging off.",
+        "data": {
+          "plug_switch": "Plug (switch)",
+          "power_sensor": "Plug power sensor (W)",
+          "energy_sensor": "Plug energy sensor (kWh, optional)",
+          "target_percent": "Charge up to (%)",
+          "start_below_percent": "Start charging below (%)",
+          "off_power_w": "Charging has ended below (W)",
+          "off_delay_min": "...for at least (minutes)"
+        }
+      }
+    }
+  }
+}

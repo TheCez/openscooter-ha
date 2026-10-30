@@ -1,0 +1,6 @@
+start_charge:
+  name: Start charging
+  description: Switch the plug on now and start watching the charge.
+stop_charge:
+  name: Stop charging
+  description: Switch the plug off now and end the current charge session.
