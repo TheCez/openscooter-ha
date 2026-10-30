@@ -516,6 +516,39 @@ class ChargeManager:
             curve.append([float(m), round(energy, 4), round(last_w, 1)])
         return curve
 
+    async def _low_since(self, off_w: float, now: datetime) -> datetime:
+        """When did the power really fall under [off_w] and stay there? Read from the plug's recorded history, so a
+        restart, a reload or a saved setting never restarts the clock. Falls back to "now" without history."""
+        power_id = self._o.get(CONF_POWER)
+        s = self.session
+        try:
+            if not power_id or "recorder" not in self.hass.config.components or s is None:
+                return now
+            from homeassistant.components.recorder import get_instance, history
+
+            started = dt_util.parse_datetime(s["start"]) or now
+            begin = max(started - timedelta(minutes=5), now - timedelta(hours=8))
+            states = await get_instance(self.hass).async_add_executor_job(
+                lambda: history.get_significant_states(self.hass, begin, now, [power_id], None, True, False, False, True))
+            pts = []
+            for st in states.get(power_id, []):
+                try:
+                    pts.append((st.last_updated, float(st.state)))
+                except (TypeError, ValueError):
+                    pts.append((st.last_updated, None))
+            pts.sort(key=lambda x: x[0])
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Could not read the plug history for the end timer: %s", err)
+            return now
+        since = None
+        for ts, w in reversed(pts):
+            if w is None:
+                continue          # unavailable/unknown readings neither start nor break the low stretch
+            if w >= off_w:
+                break
+            since = ts
+        return min(max(since, started), now) if since else now
+
     async def async_end(self, reason: str) -> None:
         """Stop now: plug off, store the session, refit the model."""
         if self.plug and reason != "plug_off":
@@ -661,9 +694,10 @@ class ChargeManager:
         if power is not None:
             if power < off_w and now - started > timedelta(minutes=5):
                 if s["low_since"] is None:
-                    s["low_since"] = now.isoformat()
-                    _LOGGER.info("Charge end timer started: %.1f W is under %.1f W; the plug is switched off after %.0f min below it",
-                                 power, off_w, off_min)
+                    since = await self._low_since(off_w, now)
+                    s["low_since"] = since.isoformat()
+                    _LOGGER.info("Charge end timer: power has been under %.1f W since %s (now %.1f W); the plug is switched off after %.0f min below it",
+                                 off_w, since.isoformat(timespec="seconds"), power, off_min)
                 low = dt_util.parse_datetime(s["low_since"]) or now
                 if now - low >= timedelta(minutes=off_min):
                     await self.async_end("taper")
